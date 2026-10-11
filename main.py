@@ -17,7 +17,7 @@ UTC = timezone.utc
 
 # 毎日朝8:00 (JST) = 前日 23:00 (UTC) に実行
 # discord.ext.tasks では time に UTC を指定するのが確実です
-NOTIFICATION_TIME = time(hour=11, minute=17, tzinfo=UTC)
+NOTIFICATION_TIME = time(hour=11, minute=24, tzinfo=UTC)
 
 # 送信先のチャンネルID（環境変数または直接指定）
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
