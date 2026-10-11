@@ -1,6 +1,6 @@
 import os
 import discord
-from discord.ext import tasks, loops
+from discord.ext import tasks
 from datetime import datetime, time, timezone, timedelta
 import feedparser
 import requests
