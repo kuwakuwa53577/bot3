@@ -15,7 +15,7 @@ JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 
 # 毎日朝8:00 (JST) = 前日 23:00 (UTC) に実行
-NOTIFICATION_TIME = time(hour=12, minute=15, tzinfo=UTC)
+NOTIFICATION_TIME = time(hour=12, minute=19, tzinfo=UTC)
 
 # 送信先のチャンネルID
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
