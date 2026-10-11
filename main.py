@@ -15,7 +15,7 @@ JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 
 # 毎日朝8:00 (JST) = 前日 23:00 (UTC) に実行
-NOTIFICATION_TIME = time(hour=11, minute=29, tzinfo=UTC)
+NOTIFICATION_TIME = time(hour=23, minute=0, tzinfo=UTC)
 
 # 送信先のチャンネルID
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
@@ -23,31 +23,39 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 @client.event
 async def on_ready():
     print(f'ログインしました: {client.user}')
+    
+    # === 動作確認用：今すぐテストしたい場合は下の行の # を消してください ===
+    # await send_morning_message()
+    
     if not daily_task.is_running():
         daily_task.start()
 
-# 最新ニュース10件を取得する関数
+# ニュースを取得する関数
 def get_latest_news():
     try:
         url = "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja"
         feed = feedparser.parse(url)
         news_list = []
+        
+        # feed.entries から最大10件取得
         for entry in feed.entries[:10]:
-            news_list.append(f"・[{entry.title}]({entry.link})")
+            title = entry.title
+            link = entry.link
+            news_list.append(f"・[{title}]({link})")
+            
         return news_list
     except Exception as e:
-        print(f"ニュース取得エラー: {e}")
+        print(f"ニュース取得中にエラーが発生しました: {e}")
         return []
 
-# 天気情報を取得する関数（サンプル）
+# 天気概況を取得する関数
 def get_weather_summary():
-    # 47都道府県の簡易まとめ（必要に応じてJMA API等に拡張可能）
     weather_text = "☀️ **【全国 47都道府県の天気概況】**\n"
-    weather_text += "本日は全国的に各地の気象情報をご確認の上、お出かけください。詳細は気象庁の最新予報をご参照ください。\n"
+    weather_text += "本日は全国的に各地の気象情報をご確認の上、お出かけください。詳細は気象庁の最新予報をご参照ください。 (´・ω・`)\n"
     return weather_text
 
-@tasks.loop(time=NOTIFICATION_TIME)
-async def daily_task():
+# メッセージを送信するメイン処理
+async def send_morning_message():
     if CHANNEL_ID == 0:
         print("CHANNEL_IDが設定されていません。")
         return
@@ -61,12 +69,12 @@ async def daily_task():
             return
 
     try:
-        # 1. 天気の送信
+        # 1. 挨拶と天気
         weather_msg = get_weather_summary()
         greeting = "おはようございます！✨ 本日の朝のニュースと全国の天気をお届けします。\n\n" + weather_msg
         await channel.send(greeting)
 
-        # 2. ニュース10件の取得と送信
+        # 2. 最新ニュース10件
         news_list = get_latest_news()
         if news_list:
             news_msg = "📰 **【最新ニュース 10選】**\n" + "\n".join(news_list)
@@ -74,9 +82,13 @@ async def daily_task():
         else:
             await channel.send("📰 ニュースの取得に失敗しました。")
             
-        print("朝の定期送信が完了しました。")
+        print("朝の定期送信が正常に完了しました。")
     except Exception as e:
         print(f"メッセージ送信中にエラーが発生しました: {e}")
+
+@tasks.loop(time=NOTIFICATION_TIME)
+async def daily_task():
+    await send_morning_message()
 
 @daily_task.before_loop
 async def before_daily_task():
