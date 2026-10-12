@@ -1,4 +1,3 @@
 discord.py
-feedparser
 flask
-requests
+aiohttp
