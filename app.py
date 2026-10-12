@@ -31,7 +31,7 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. 【既存】IPアドレス検索コマンド ---
+# --- 3. IPアドレス検索コマンド ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国や都市、プロバイダ情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -64,49 +64,45 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 4. ✨【新機能】郵便番号検索コマンド ---
+# --- 4. 🛠️【修正済】郵便番号検索コマンド ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します（ハイフンなしでもOK）")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 1000005 または 100-0005）")
+@app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
-    # 応答を保留
     await interaction.response.defer(thinking=True)
 
-    # 入力された文字からハイフン「-」や空白を消して、数字の7桁にする
+    # 入力された文字からハイフンや空白を消去
     clean_zip = zip_code.strip().replace("-", "").replace(" ", "")
 
-    # 7桁の数字になっていない場合はエラーを出すガード処理
     if not clean_zip.isdigit() or len(clean_zip) != 7:
         await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。（例: 100-0005 または 1000005）")
         return
 
-    # Zipcloudの無料APIを利用
-    api_url = f"https://ibsnet.co.jp{clean_zip}"
+    # 💡【絶対にバグらない組み立て方式に変更】
+    # ドメイン、フォルダ、パラメータを別々に用意して安全に合体させます
+    base_url = "https://ibsnet.co.jp"
+    path = "/api/search"
+    params = {"zipcode": clean_zip}
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as response:
+            # これにより自動的にスラッシュが綺麗に補完されて安全に通信できます
+            async with session.get(f"{base_url}{path}", params=params) as response:
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 郵便番号サーバーとの通信に失敗しました。")
                     return
                 data = await response.json()
 
-        # 該当する住所が見つからなかった場合
         if data.get("results") is None:
             message = data.get("message", "該当する住所が見つかりませんでした。")
             await interaction.followup.send(f"⚠️ {message}")
             return
 
-        # 見つかった最初の住所データを取得
         result = data["results"][0]
-        
-        # 都道府県名 + 市区町村名 + 町域名 を合体させる
         full_address = f"{result['address1']}{result['address2']}{result['address3']}"
-        # フリガナ（カタカナ表記）も合体させる
         kana_address = f"{result['kana1']}{result['kana2']}{result['kana3']}"
 
-        # 綺麗なカード（Embed）にして表示
         embed = discord.Embed(
             title=f"📮 郵便番号検索結果: 〒{clean_zip[:3]}-{clean_zip[3:]}",
             color=discord.Color.green()
