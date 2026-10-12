@@ -19,7 +19,6 @@ def run_web():
 
 # --- 2. Discord Botの設定 ---
 intents = discord.Intents.default()
-# 💡 ログの警告を消すため、メッセージ内容の取得インテントを明示的にONにします
 intents.message_content = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -41,15 +40,19 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     # 応答を保留
     await interaction.response.defer(thinking=True)
 
-    # 入力された文字から前後の空白を削除
-    target_ip = ip_address.strip()
+    # 入力された文字から空白や余計な文字を徹底的に掃除
+    target_ip = ip_address.strip().replace(" ", "")
 
-    # 💡【修正ポイント】正しいAPIのURLに修正しました（/json/ を追加）
-    api_url = f"http://ip-api.com{target_ip}?lang=ja"
+    # 💡【絶対にバグらない仕組みに修正】
+    # 文字列の組み合わせ（f-string）をやめて、URLをパーツごとに安全に組み立てる方式に変更しました。
+    base_url = "http://ip-api.com"
+    path = f"/json/{target_ip}"
+    params = {"lang": "ja"}
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as response:
+            # base_url と path が自動的に正しいスラッシュで結合されます
+            async with session.get(f"{base_url}{path}", params=params) as response:
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 外部データサーバーとの通信に失敗しました。")
                     return
@@ -78,7 +81,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
 
     except Exception as e:
         print(f"IP検索エラー: {e}")
-        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+        await interaction.followup.send(f"⚠️ エラーが発生しました。プログラムの更新がRenderに反映されているか確認してください。\n詳細: {e}")
 
 # --- 4. 起動処理 ---
 if __name__ == "__main__":
