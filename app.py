@@ -64,7 +64,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 4. 🚀【完全無料・登録不要の決定版】郵便番号検索コマンド ---
+# --- 4. 🚀【URL修正完了】郵便番号検索コマンド ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します（ハイフンなしでもOK）")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -79,30 +79,30 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。（例: 100-0005）")
         return
 
-    # 💡 登録不要・完全無料で使える超安定な日本の郵便番号API（miniwing）に変更
-    base_url = "https://zipaddress.net"
+    # 💡【修正ポイント】正しいデータ配信用のアドレス「api.」を追加しました
+    base_url = "https://api.zipaddress.net"
     params = {"zipcode": clean_zip}
 
     try:
         async with aiohttp.ClientSession() as session:
+            # 外部サーバーからデータを安全に読み込みます
             async with session.get(base_url, params=params) as response:
                 if response.status != 200:
-                    await interaction.followup.send(f"⚠️ 郵便番号サーバーが混み合っています。少し時間を置いて再度お試しください。(Status: {response.status})")
+                    await interaction.followup.send(f"⚠️ 郵便番号サーバーとの通信に失敗しました。(Status: {response.status})")
                     return
                 
-                data = await response.json()
+                # エラー（Unexpected mimetype）を防ぐため、content_type=None を指定して確実にJSONとして解析します
+                data = await response.json(content_type=None)
 
-        # 該当する住所が見つからなかった場合（codeが200でもdataが空の場合があります）
+        # 💡 APIの仕様に合わせたステータスチェック
         if data.get("code") != 200 or not data.get("data"):
             await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
             return
 
         address_info = data["data"]
         
-        # 都道府県名、市区町村名、町域名を綺麗に抽出して合体
-        pref = address_info.get("pref", "")
-        address = address_info.get("address", "")
-        full_address = f"{pref}{address}"
+        # APIが返してくれる結合済みの住所（fullAddress）を綺麗に抽出
+        full_address = address_info.get("fullAddress", "")
 
         # 綺麗な緑色のカード（Embed）を作成
         embed = discord.Embed(
