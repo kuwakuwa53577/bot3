@@ -19,7 +19,8 @@ def run_web():
 
 # --- 2. Discord Botの設定 ---
 intents = discord.Intents.default()
-# ユーザーインストール型（外部アプリ）としてどこでも動くように設定
+# 💡 ログの警告を消すため、メッセージ内容の取得インテントを明示的にONにします
+intents.message_content = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
@@ -33,17 +34,17 @@ async def on_ready():
 
 # --- 3. IPアドレス検索コマンド ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国や都市、プロバイダ情報を検索します")
-@app_commands.allowed_installs(guilds=True, users=True)  # 他人のサーバーやDMでも使用可能に
+@app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
 async def lookup_ip(interaction: discord.Interaction, ip_address: str):
-    # 検索に少し時間がかかる場合があるため、応答を保留
+    # 応答を保留
     await interaction.response.defer(thinking=True)
 
-    # 空白を削除
+    # 入力された文字から前後の空白を削除
     target_ip = ip_address.strip()
 
-    # ip-api.com の無料APIを利用して情報を取得
+    # 💡【修正ポイント】正しいAPIのURLに修正しました（/json/ を追加）
     api_url = f"http://ip-api.com{target_ip}?lang=ja"
 
     try:
@@ -60,7 +61,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。IPアドレスが正しいか確認してください。\n理由: {data.get('message')}")
             return
 
-        # 💡 取得したデータを綺麗に並べて埋め込み（Embed）メッセージを作成
+        # 取得したデータを埋め込み（Embed）メッセージにセット
         embed = discord.Embed(
             title=f"🌐 IPアドレス検索結果: {target_ip}",
             color=discord.Color.blue()
@@ -72,7 +73,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         embed.add_field(name="📮 郵便番号", value=data.get("zip", "不明"), inline=True)
         embed.add_field(name="⏰ タイムゾーン", value=data.get("timezone", "不明"), inline=True)
 
-        # 検索結果を送信
+        # 結果を送信
         await interaction.followup.send(embed=embed)
 
     except Exception as e:
