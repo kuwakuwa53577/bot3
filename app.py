@@ -64,7 +64,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 4. 🛠️【修正済】郵便番号検索コマンド ---
+# --- 4. 🚀【超安定版に強化】郵便番号検索コマンド ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します（ハイフンなしでもOK）")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -76,39 +76,53 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     clean_zip = zip_code.strip().replace("-", "").replace(" ", "")
 
     if not clean_zip.isdigit() or len(clean_zip) != 7:
-        await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。（例: 100-0005 または 1000005）")
+        await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。（例: 100-0005）")
         return
 
-    # 💡【絶対にバグらない組み立て方式に変更】
-    # ドメイン、フォルダ、パラメータを別々に用意して安全に合体させます
-    base_url = "https://ibsnet.co.jp"
-    path = "/api/search"
-    params = {"zipcode": clean_zip}
+    # 💡 非常に安定している大手の郵便番号検索APIサービス（postcode-jp）に切り替え
+    base_url = "https://postcode-jp.com"
+    path = f"/v1/postcodes/{clean_zip}"
 
     try:
         async with aiohttp.ClientSession() as session:
-            # これにより自動的にスラッシュが綺麗に補完されて安全に通信できます
-            async with session.get(f"{base_url}{path}", params=params) as response:
-                if response.status != 200:
-                    await interaction.followup.send("⚠️ 郵便番号サーバーとの通信に失敗しました。")
+            async with session.get(f"{base_url}{path}") as response:
+                # 存在しない郵便番号などの場合は404が返ってくるためチェック
+                if response.status == 404:
+                    await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
                     return
+                elif response.status != 200:
+                    await interaction.followup.send(f"⚠️ 郵便番号サーバーが混み合っています。少し時間を置いて再度お試しください。(Status: {response.status})")
+                    return
+                
                 data = await response.json()
 
-        if data.get("results") is None:
-            message = data.get("message", "該当する住所が見つかりませんでした。")
-            await interaction.followup.send(f"⚠️ {message}")
+        # データの解析
+        if not data or "data" not in data or len(data["data"]) == 0:
+            await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。")
             return
 
-        result = data["results"][0]
-        full_address = f"{result['address1']}{result['address2']}{result['address3']}"
-        kana_address = f"{result['kana1']}{result['kana2']}{result['kana3']}"
+        # 最初の該当住所を抽出
+        address_info = data["data"][0]
+        
+        # 住所の各パーツ（都道府県、市区町村、町域）を取得
+        pref = address_info.get("pref", "")
+        city = address_info.get("city", "")
+        town = address_info.get("town", "")
+        full_address = f"{pref}{city}{town}"
 
+        # カナ住所の取得
+        pref_kana = address_info.get("pref_kana", "")
+        city_kana = address_info.get("city_kana", "")
+        town_kana = address_info.get("town_kana", "")
+        kana_address = f"{pref_kana}{city_kana}{town_kana}"
+
+        # 綺麗なカード（Embed）を作成
         embed = discord.Embed(
             title=f"📮 郵便番号検索結果: 〒{clean_zip[:3]}-{clean_zip[3:]}",
             color=discord.Color.green()
         )
-        embed.add_field(name="📍 住所", value=full_address, inline=False)
-        embed.add_field(name="📝 フリガナ", value=kana_address, inline=False)
+        embed.add_field(name="📍 住所", value=full_address if full_address else "不明", inline=False)
+        embed.add_field(name="📝 フリガナ", value=kana_address if kana_address else "不明", inline=False)
         
         await interaction.followup.send(embed=embed)
 
