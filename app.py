@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from flask import Flask
+import base64
 
 # --- 1. Flask（簡易Webサーバー）の設定 ---
 app = Flask(__name__)
@@ -31,143 +32,181 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. IPアドレス検索コマンド（全22情報対応版） ---
-@bot.tree.command(name="ip", description="指定されたIPアドレスのすべての情報（22種類）を検索します")
+# --- 3. IPアドレス検索コマンド（住所自動一発表示・22情報対応） ---
+@bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
 async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
-    base_url = "http://ip-api.com"
-    path = f"/json/{target_ip}"
     
-    # 💡 全22情報を取得するために、すべてのフィールド（fields=66846719）を明示的に要求します
-    params = {
-        "lang": "ja",
-        "fields": "66846719"
-    }
+    ip_url = f"http://ip-api.com/json/{target_ip}"
+    ip_params = {"lang": "ja", "fields": "66846719"}
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{base_url}{path}", params=params) as response:
+            async with session.get(ip_url, params=ip_params) as response:
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 外部データサーバーとの通信に失敗しました。")
                     return
                 data = await response.json()
 
         if data.get("status") == "fail":
-            await interaction.followup.send(f"⚠️ 情報を取得できませんでした。\n理由: {data.get('message')}")
+            await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message')}")
             return
 
-        # 綺麗な青いカード（Embed）を作成
-        embed = discord.Embed(
-            title=f"🌐 IPアドレス詳細解析結果: {data.get('query', target_ip)}", 
-            color=discord.Color.blue(),
-            description="APIから取得できる全22情報を表示しています。"
-        )
+        zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
+        full_address = "不明または日本国外"
+        
+        if zip_code and len(zip_code) == 7 and zip_code.isdigit():
+            zip_url = "https://api.zipaddress.net"
+            zip_params = {"zipcode": zip_code}
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(zip_url, params=zip_params) as z_resp:
+                        if z_resp.status == 200:
+                            z_data = await z_resp.json(content_type=None)
+                            if z_data.get("code") == 200 and z_data.get("data"):
+                                full_address = z_data["data"].get("fullAddress", "不明")
+            except Exception:
+                full_address = "住所逆引き中にエラーが発生しました"
 
-        # 🗺️ 1. 位置情報・住所グループ（10情報）
+        embed = discord.Embed(title=f"🌐 IPアドレス詳細解析結果: {data.get('query', target_ip)}", color=discord.Color.blue())
+        
         embed.add_field(name="📍 住所・タイムゾーン", value=(
-            f"**大陸:** {data.get('continent', '不明')} ({data.get('continentCode', '-')})\n"
+            f"**自動逆引き住所:** {full_address}\n"
             f"**国名:** {data.get('country', '不明')} ({data.get('countryCode', '-')})\n"
-            f"**都道府県/州:** {data.get('regionName', '不明')} ({data.get('region', '-')})\n"
-            f"**都市:** {data.get('city', '不明')}\n"
-            f"**区・地域:** {data.get('district', 'なし・不明')}\n"
+            f"**都道府県/州:** {data.get('regionName', '不明')}\n"
+            f"**都市/区:** {data.get('city', '不明')} / {data.get('district', 'なし')}\n"
             f"**郵便番号:** 〒{data.get('zip', '不明')}\n"
             f"**タイムゾーン:** {data.get('timezone', '不明')}"
         ), inline=False)
 
-        # 🌐 2. 座標・時間グループ（3情報）
-        embed.add_field(name="🧭 地図・座標・時差", value=(
-            f"**緯度 (Lat):** {data.get('lat', '不明')}\n"
-            f"**経度 (Lon):** {data.get('lon', '不明')}\n"
-            f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間"
-        ), inline=True)
+        embed.add_field(name="🧭 座標・時差・通貨", value=(
+            f"**緯度/経度:** {data.get('lat', '-')}, {data.get('lon', '-')}\n"
+            f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間\n"
+            f"**使用通貨:** {data.get('currency', '不明')}"
+        ), inline=False)
 
-        # 💴 3. 通貨（1情報）
-        embed.add_field(name="💴 通貨", value=f"{data.get('currency', '不明')}", inline=True)
-
-        # 🏢 4. 回線・プロバイダグループ（5情報）
         embed.add_field(name="🏢 通信会社・ネットワーク", value=(
             f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
             f"**組織名 (Org):** {data.get('org', '不明')}\n"
-            f"**AS番号:** {data.get('as', '不明')}\n"
-            f"**AS名:** {data.get('asname', '不明')}"
+            f"**AS番号/名:** {data.get('as', '不明')} / {data.get('asname', '不明')}"
         ), inline=False)
 
-        # 🚨 5. 特殊判定グループ（3情報）
-        # Trueなら 🔴、Falseなら 🟢 で直感的にわかりやすく表示します
         is_mobile = "🔴 モバイル回線 (4G/5G)" if data.get("mobile") else "🟢 固定回線など"
-        is_proxy = "🔴 VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続 (安全)"
+        is_proxy = "🔴 VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
         is_hosting = "🔴 サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
+        embed.add_field(name="🚨 特殊回線判定", value=f"**回線種類:** {is_mobile}\n**匿名ツール:** {is_proxy}\n**ホスティング:** {is_hosting}", inline=False)
 
-        embed.add_field(name="🚨 特殊な通信の判定", value=(
-            f"**回線種別:** {is_mobile}\n"
-            f"**匿名化ツール:** {is_proxy}\n"
-            f"**ホスティング:** {is_hosting}"
-        ), inline=False)
-
-        await interaction.followup.send(embed=embed)
-        
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 4. 🚀【URL修正完了】郵便番号検索コマンド ---
-@bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します（ハイフンなしでもOK）")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+# --- 4. 郵便番号検索コマンド ---
+@bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     await interaction.response.defer(thinking=True)
-
-    # 入力された文字からハイフンや空白を消去
     clean_zip = zip_code.strip().replace("-", "").replace(" ", "")
-
     if not clean_zip.isdigit() or len(clean_zip) != 7:
-        await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。（例: 100-0005）")
+        await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。")
         return
-
-    # 💡【修正ポイント】正しいデータ配信用のアドレス「api.」を追加しました
     base_url = "https://api.zipaddress.net"
-    params = {"zipcode": clean_zip}
-
     try:
         async with aiohttp.ClientSession() as session:
-            # 外部サーバーからデータを安全に読み込みます
-            async with session.get(base_url, params=params) as response:
-                if response.status != 200:
-                    await interaction.followup.send(f"⚠️ 郵便番号サーバーとの通信に失敗しました。(Status: {response.status})")
-                    return
-                
-                # エラー（Unexpected mimetype）を防ぐため、content_type=None を指定して確実にJSONとして解析します
+            async with session.get(base_url, params={"zipcode": clean_zip}) as response:
                 data = await response.json(content_type=None)
-
-        # 💡 APIの仕様に合わせたステータスチェック
         if data.get("code") != 200 or not data.get("data"):
-            await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
+            await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。")
             return
-
-        address_info = data["data"]
-        
-        # APIが返してくれる結合済みの住所（fullAddress）を綺麗に抽出
-        full_address = address_info.get("fullAddress", "")
-
-        # 綺麗な緑色のカード（Embed）を作成
-        embed = discord.Embed(
-            title=f"📮 郵便番号検索結果: 〒{clean_zip[:3]}-{clean_zip[3:]}",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="📍 住所", value=full_address if full_address else "不明", inline=False)
-        
+        full_address = data["data"].get("fullAddress", "")
+        embed = discord.Embed(title=f"📮 郵便番号検索結果: 〒{clean_zip[:3]}-{clean_zip[3:]}", color=discord.Color.green())
+        embed.add_field(name="📍 住所", value=full_address, inline=False)
         await interaction.followup.send(embed=embed)
-
     except Exception as e:
-        print(f"郵便番号検索エラー: {e}")
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 5. 起動処理 ---
+# --- 5. ドメイン検索コマンド（機能1） ---
+@bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
+@app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
+async def lookup_domain(interaction: discord.Interaction, domain_name: str):
+    await interaction.response.defer(thinking=True)
+    clean_domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
+    url = f"https://rdap.org{clean_domain}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    await interaction.followup.send("⚠️ ドメイン情報が見つからないか、非対応の拡張子です。")
+                    return
+                data = await response.json()
+        
+        events = data.get("events", [])
+        created = updated = expires = "不明"
+        for event in events:
+            action = event.get("eventAction")
+            date = event.get("eventDate", "").replace("T", " ").replace("Z", "")
+            if action == "registration": created = date
+            elif action == "last changed": updated = date
+            elif action == "expiration": expires = date
+
+        embed = discord.Embed(title=f"🌐 ドメイン情報検索: {clean_domain}", color=discord.Color.purple())
+        embed.add_field(name="📅 登録日 (作成日)", value=created, inline=True)
+        embed.add_field(name="🔄 最終更新日", value=updated, inline=True)
+        embed.add_field(name="⏳ 有効期限", value=expires, inline=True)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+# --- 6. URL安全チェックコマンド（機能2） ---
+@bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
+@app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
+async def check_url(interaction: discord.Interaction, target_url: str):
+    await interaction.response.defer(thinking=True)
+    api_key = os.environ.get("VIRUSTOTAL_API_KEY")
+    if not api_key:
+        await interaction.followup.send("⚠️ VirusTotalのAPIキーが設定されていません。環境変数を確認してください。")
+        return
+    
+    headers = {"x-apikey": api_key}
+    url_id = base64.urlsafe_b64encode(target_url.encode()).decode().strip("=")
+    api_url = f"https://virustotal.com{url_id}"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, headers=headers) as response:
+                if response.status == 404:
+                    scan_url = "https://virustotal.com"
+                    async with session.post(scan_url, headers=headers, data={"url": target_url}) as p_resp:
+                        if p_resp.status == 200:
+                            await interaction.followup.send("🔄 このURLは初めてチェックされました。現在解析中ですので、数十秒後にもう一度試してください！")
+                            return
+                if response.status != 200:
+                    await interaction.followup.send("⚠️ 安全チェックサーバーとの通信に失敗しました。")
+                    return
+                data = await response.json()
+        
+        stats = data["data"]["attributes"]["last_analysis_stats"]
+        malicious = stats.get("malicious", 0)
+        suspicious = stats.get("suspicious", 0)
+        harmless = stats.get("harmless", 0)
+        
+        if malicious > 0 or suspicious > 0:
+            embed = discord.Embed(title="🚨 危険URL警告", color=discord.Color.red(), description=f"対象URL: {target_url}")
+            embed.add_field(name="❌ 危険・詐欺判定件数", value=f"**{malicious}** 件のエンジンが危険と判定", inline=False)
+            embed.add_field(name="⚠️ 怪しい判定件数", value=f"{suspicious} 件", inline=True)
+        else:
+            embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象URL: {target_url}")
+            embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
+        
+        embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+# --- 7. 起動処理 ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web)
     web_thread.daemon = True
