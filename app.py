@@ -66,7 +66,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
                 async with aiohttp.ClientSession() as session:
                     async with session.get(zip_url, params=zip_params) as z_resp:
                         if z_resp.status == 200:
-                            # content_type=None を指定して text/plain のミスマッチエラーを防ぐ
                             z_data = await z_resp.json(content_type=None)
                             if z_data.get("status") == 200 and z_data.get("results"):
                                 res = z_data["results"][0]
@@ -139,7 +138,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 5. ドメイン検索コマンド（各TLDに応じたRDAPサーバーへの対応強化） ---
+# --- 5. ドメイン検索コマンド（IANAブートストラップを使った完全版） ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
@@ -147,29 +146,42 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
     tld = domain.split(".")[-1].lower()
 
-    # TLDごとの主要RDAPサーバー（必要に応じて振り分け）
-    rdap_base = "https://rdap.org"
-    if tld == "jp":
-        rdap_base = "https://rdap.jprs.jp"
-
-    url = f"{rdap_base}/domain/{domain}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers={"Accept": "application/json"}) as response:
-                if response.status != 200:
-                    # フォールバックとして rdap.org を直接試す
-                    if rdap_base != "https://rdap.org":
-                        async with session.get(f"https://rdap.org/domain/{domain}", headers={"Accept": "application/json"}) as fb_resp:
-                            if fb_resp.status == 200:
-                                data = await fb_resp.json(content_type=None)
-                            else:
-                                await interaction.followup.send("⚠️ ドメイン情報が見つからないか、非対応の拡張子です。")
-                                return
-                    else:
-                        await interaction.followup.send("⚠️ ドメイン情報が見つからないか、非対応の拡張子です。")
-                        return
+            # 1. IANAからこのTLDを管理する公式RDAPサーバーのURLを取得する
+            iana_url = f"https://rdap.iana.org/domain/{tld}"
+            async with session.get(iana_url, headers={"Accept": "application/json"}) as iana_resp:
+                if iana_resp.status != 200:
+                    await interaction.followup.send("⚠️ 非対応の拡張子、またはドメインが見つかりませんでした。")
+                    return
+                iana_data = await iana_resp.json(content_type=None)
+            
+            # 正式なRDAPサーバーのリンクを探す
+            rdap_servers = iana_data.get("links", [])
+            target_rdap_url = None
+            for link in rdap_servers:
+                href = link.get("href", "")
+                if "rdap" in href and href.startswith("https://"):
+                    target_rdap_url = href.rstrip("/")
+                    break
+            
+            # 万が一見つからない場合のフォールバック
+            if not target_rdap_url:
+                target_rdap_url = f"https://rdap.org"
+
+            # 2. 正式なRDAPサーバーに対してドメイン情報を問い合わせる
+            domain_query_url = f"{target_rdap_url}/domain/{domain}"
+            async with session.get(domain_query_url, headers={"Accept": "application/json"}) as domain_resp:
+                if domain_resp.status != 200:
+                    # 最後の手段として rdap.org を直叩き
+                    async with session.get(f"https://rdap.org/domain/{domain}", headers={"Accept": "application/json"}) as fallback_resp:
+                        if fallback_resp.status == 200:
+                            data = await fallback_resp.json(content_type=None)
+                        else:
+                            await interaction.followup.send("⚠️ 該当ドメインの登録情報が見つかりませんでした。")
+                            return
                 else:
-                    data = await response.json(content_type=None)
+                    data = await domain_resp.json(content_type=None)
         
         events = data.get("events", [])
         created = updated = expires = "不明"
