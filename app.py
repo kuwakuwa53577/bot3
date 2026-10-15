@@ -59,7 +59,10 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         embed.add_field(name="🌍 国", value=data.get("country", "不明"), inline=True)
         embed.add_field(name="🏙️ 都道府県/州", value=data.get("regionName", "不明"), inline=True)
         embed.add_field(name="📍 都市", value=data.get("city", "不明"), inline=True)
+        # 👇 ここにこの1行を追加します！
+        embed.add_field(name="📮 郵便番号", value=data.get("zip", "不明"), inline=True) 
         embed.add_field(name="🏢 プロバイダ (ISP)", value=data.get("isp", "不明"), inline=False)
+
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
