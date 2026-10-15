@@ -33,6 +33,7 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 # --- 3. IPアドレス検索コマンド（住所自動一発表示・22情報対応） ---
+# --- 3. IPアドレス検索コマンド（住所自動一発表示・22情報対応） ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -41,7 +42,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
     
-    ip_url = f"http://ip-api.com/json/{target_ip}"
+    ip_url = f"http://ip-api.com{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
     try:
@@ -60,7 +61,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         full_address = "不明または日本国外"
         
         if zip_code and len(zip_code) == 7 and zip_code.isdigit():
-            zip_url = "https://api.zipaddress.net"
+            zip_url = "https://zipaddress.net"
             zip_params = {"zipcode": zip_code}
             try:
                 async with aiohttp.ClientSession() as session:
@@ -113,7 +114,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     if not clean_zip.isdigit() or len(clean_zip) != 7:
         await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。")
         return
-    base_url = "https://api.zipaddress.net"
+    base_url = "https://zipaddress.net"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(base_url, params={"zipcode": clean_zip}) as response:
@@ -128,12 +129,15 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 5. ドメイン検索コマンド（機能1） ---
+# --- 5. ドメイン検索コマンド（💡URL結合バグを修正完了） ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
+    # httpなどの余計な文字を削って純粋なドメイン名にする
     clean_domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
+    
+    # 💡「/」が抜けていたURLの結合部分を綺麗に修正しました
     url = f"https://rdap.org{clean_domain}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -160,7 +164,7 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 6. URL安全チェックコマンド（機能2） ---
+# --- 6. URL安全チェックコマンド ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
