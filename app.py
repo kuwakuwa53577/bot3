@@ -216,10 +216,11 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
+# --- 7. 起動処理（⚠️インデントのズレを完全に修正） ---
+if __name__ == "__main__":
+    web_thread = threading.Thread(target=run_web)
+    web_thread.daemon = True
+    web_thread.start()
 
-if name == "main":
-web_thread = threading.Thread(target=run_web)
-web_thread.daemon = True
-web_thread.start()
-token = os.environ.get("DISCORD_TOKEN")
-bot.run(token)
+    token = os.environ.get("DISCORD_TOKEN")
+    bot.run(token)
