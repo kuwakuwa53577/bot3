@@ -32,7 +32,7 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. IPアドレス検索コマンド（URL結合と郵便逆引きを完全修正） ---
+# --- 3. IPアドレス検索コマンド（zipcloudのcontent_type対策済み） ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -41,7 +41,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
     
-    # 【修正】ip-apiの正しいURLフォーマットに修正
     ip_url = f"http://ip-api.com/json/{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
@@ -51,7 +50,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 外部データサーバーとの通信に失敗しました。")
                     return
-                data = await response.json()
+                data = await response.json(content_type=None)
 
         if data.get("status") == "fail":
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message')}")
@@ -61,14 +60,14 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         full_address = "不明または日本国外"
         
         if zip_code and len(zip_code) == 7 and zip_code.isdigit():
-            # 【修正】正しいzipcloud APIのURLに修正
             zip_url = "https://zipcloud.ibsnet.co.jp/api/search"
             zip_params = {"zipcode": zip_code}
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(zip_url, params=zip_params) as z_resp:
                         if z_resp.status == 200:
-                            z_data = await z_resp.json()
+                            # content_type=None を指定して text/plain のミスマッチエラーを防ぐ
+                            z_data = await z_resp.json(content_type=None)
                             if z_data.get("status") == 200 and z_data.get("results"):
                                 res = z_data["results"][0]
                                 full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
@@ -107,7 +106,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 4. 郵便番号検索コマンド（zipcloud完全対応版） ---
+# --- 4. 郵便番号検索コマンド（content_type対策済み） ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
@@ -117,7 +116,6 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。")
         return
         
-    # 【修正】正しいzipcloud APIのURLを指定
     base_url = "https://zipcloud.ibsnet.co.jp/api/search"
     try:
         async with aiohttp.ClientSession() as session:
@@ -125,7 +123,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 郵便番号サーバーとの通信に失敗しました。")
                     return
-                data = await response.json()
+                data = await response.json(content_type=None)
                 
         if data.get("status") != 200 or not data.get("results"):
             await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
@@ -141,22 +139,37 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 5. ドメイン検索コマンド（URL結合を完全修正） ---
+# --- 5. ドメイン検索コマンド（各TLDに応じたRDAPサーバーへの対応強化） ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
     domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
-    
-    # 【修正】RDAPの正しいエンドポイントURLに変更
-    url = f"https://rdap.org/domain/{domain}"
+    tld = domain.split(".")[-1].lower()
+
+    # TLDごとの主要RDAPサーバー（必要に応じて振り分け）
+    rdap_base = "https://rdap.org"
+    if tld == "jp":
+        rdap_base = "https://rdap.jprs.jp"
+
+    url = f"{rdap_base}/domain/{domain}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
+            async with session.get(url, headers={"Accept": "application/json"}) as response:
                 if response.status != 200:
-                    await interaction.followup.send("⚠️ ドメイン情報が見つからないか、非対応の拡張子です。")
-                    return
-                data = await response.json()
+                    # フォールバックとして rdap.org を直接試す
+                    if rdap_base != "https://rdap.org":
+                        async with session.get(f"https://rdap.org/domain/{domain}", headers={"Accept": "application/json"}) as fb_resp:
+                            if fb_resp.status == 200:
+                                data = await fb_resp.json(content_type=None)
+                            else:
+                                await interaction.followup.send("⚠️ ドメイン情報が見つからないか、非対応の拡張子です。")
+                                return
+                    else:
+                        await interaction.followup.send("⚠️ ドメイン情報が見つからないか、非対応の拡張子です。")
+                        return
+                else:
+                    data = await response.json(content_type=None)
         
         events = data.get("events", [])
         created = updated = expires = "不明"
@@ -176,7 +189,7 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 6. URL安全チェックコマンド（URL結合を完全修正） ---
+# --- 6. URL安全チェックコマンド ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
@@ -189,8 +202,6 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     headers = {"x-apikey": api_key}
     raw_url = target_url.strip()
     url_id = base64.urlsafe_b64encode(raw_url.encode('utf-8')).decode('utf-8').rstrip("=")
-    
-    # 【修正】VirusTotalの正しいAPI v3エンドポイントに修正
     api_url = f"https://www.virustotal.com/api/v3/urls/{url_id}"
     
     try:
@@ -205,7 +216,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 安全チェックサーバーとの通信に失敗しました。")
                     return
-                data = await response.json()
+                data = await response.json(content_type=None)
         
         stats = data["data"]["attributes"]["last_analysis_stats"]
         malicious = stats.get("malicious", 0)
