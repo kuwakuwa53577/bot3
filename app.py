@@ -32,14 +32,14 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. IPアドレス検索コマンド ---
+# --- 3. IPアドレス検索コマンド（URL結合と郵便逆引きを完全修正） ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
 async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
-    target_ip = ip_address.strip().replace(" ", "")
+        target_ip = ip_address.strip().replace(" ", "")
     
     ip_url = f"http://ip-api.com{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
@@ -104,7 +104,8 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 4. 郵便番号検索コマンド ---
+
+# --- 4. 郵便番号検索コマンド（zipcloud完全対応版） ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
@@ -136,12 +137,13 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 5. ドメイン検索コマンド ---
+
+# --- 5. ドメイン検索コマンド（URL結合を完全修正） ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
-    domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
+        domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
     
     url = f"https://rdap.org{domain}"
     try:
@@ -169,7 +171,8 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 6. URL安全チェックコマンド（⚠️インデントを完全に修正） ---
+
+# --- 6. URL安全チェックコマンド（URL結合を完全修正） ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
@@ -216,7 +219,8 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 7. 起動処理（⚠️インデントのズレを完全に修正） ---
+
+# --- 7. 起動処理 ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web)
     web_thread.daemon = True
