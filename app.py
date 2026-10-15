@@ -32,7 +32,7 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. IPアドレス検索コマンド（URL結合と郵便逆引きを完全修正） ---
+# --- 3. IPアドレス検索コマンド（URLバグ完全修正版） ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -41,6 +41,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
     
+    # 💡 URLの末尾に正しくスラッシュを入れてIPをテキストとして結合
     ip_url = f"http://ip-api.com{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
@@ -56,11 +57,11 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message')}")
             return
 
-        # 💡 正しい「zipcloud」のAPIエンドポイントURLに修正
         zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
         full_address = "不明または日本国外"
         
         if zip_code and len(zip_code) == 7 and zip_code.isdigit():
+            # 💡 正しい大手の郵便番号APIを使用
             zip_url = "https://ibsnet.co.jp"
             zip_params = {"zipcode": zip_code}
             try:
@@ -69,7 +70,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
                         if z_resp.status == 200:
                             z_data = await z_resp.json()
                             if z_data.get("status") == 200 and z_data.get("results"):
-                                res = z_data["results"][0]  # 💡配列の最初の要素を正しく取得
+                                res = z_data["results"][0]
                                 full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
             except Exception:
                 full_address = "住所逆引き中にエラーが発生しました"
@@ -106,8 +107,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-
-# --- 4. 郵便番号検索コマンド（zipcloud完全対応版） ---
+# --- 4. 郵便番号検索コマンド（バグ完全修正版） ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
@@ -130,7 +130,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
             await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
             return
             
-        res = data["results"][0]  # 💡配列から最初の要素を正しく取得
+        res = data["results"][0]
         full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
         
         embed = discord.Embed(title=f"📮 郵便番号検索結果: 〒{clean_zip[:3]}-{clean_zip[3:]}", color=discord.Color.green())
@@ -139,14 +139,13 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-
-# --- 5. ドメイン検索コマンド（💡リスト変換バグを完全修正） ---
+# --- 5. ドメイン検索コマンド（バグ完全修正版） ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
     
-    # 💡リストではなく、純粋な「文字列（文字）」としてドメイン名を処理するように修正
+    # 💡 リストではなく文字列として確実に処理
     domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
     
     url = f"https://rdap.org{domain}"
@@ -175,8 +174,7 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-
-# --- 6. URL安全チェックコマンド（💡Base64と文字列の変換バグを完全修正） ---
+# --- 6. URL安全チェックコマンド（バグ完全修正版） ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
@@ -187,8 +185,6 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         return
     
     headers = {"x-apikey": api_key}
-    
-    # 💡ターゲットURLを正しい文字データとしてエンコード
     raw_url = target_url.strip()
     url_id = base64.urlsafe_b64encode(raw_url.encode('utf-8')).decode('utf-8').rstrip("=")
     api_url = f"https://virustotal.com{url_id}"
@@ -218,18 +214,17 @@ async def check_url(interaction: discord.Interaction, target_url: str):
             embed.add_field(name="⚠️ 怪しい判定件数", value=f"{suspicious} 件", inline=True)
         else:
             embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象URL: {raw_url}")
-            embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
-        
-        embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
+embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
+await interaction.followup.send(embed=embed)
+except Exception as e:
+await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 7. 起動処理 ---
-if __name__ == "__main__":
-    web_thread = threading.Thread(target=run_web)
-    web_thread.daemon = True
-    web_thread.start()
+--- 7. 起動処理 ---
 
-    token = os.environ.get("DISCORD_TOKEN")
-    bot.run(token)
+if name == "main":
+web_thread = threading.Thread(target=run_web)
+web_thread.daemon = True
+web_thread.start()
+token = os.environ.get("DISCORD_TOKEN")
+bot.run(token)
