@@ -169,7 +169,7 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 6. URL安全チェックコマンド（✨インデントエラーを完全修正） ---
+# --- 6. URL安全チェックコマンド（⚠️インデントを完全に修正） ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
@@ -194,7 +194,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
                             await interaction.followup.send("🔄 このURLは初めてチェックされました。現在解析中ですので、数十秒後にもう一度試してください！")
                             return
                 if response.status != 200:
-                    await interaction.followup.send(f"⚠️ 安全チェックサーバーとの通信に失敗しました。")
+                    await interaction.followup.send("⚠️ 安全チェックサーバーとの通信に失敗しました。")
                     return
                 data = await response.json()
         
@@ -210,10 +210,12 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         else:
             embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象URL: {raw_url}")
             embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
-            embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
+        
+        embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
         await interaction.followup.send(embed=embed)
-        except Exception as e:
+    except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
 
 if name == "main":
 web_thread = threading.Thread(target=run_web)
