@@ -39,9 +39,10 @@ async def on_ready():
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
 async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
-        target_ip = ip_address.strip().replace(" ", "")
+    target_ip = ip_address.strip().replace(" ", "")
     
-    ip_url = f"http://ip-api.com{target_ip}"
+    # 【修正】ip-apiの正しいURLフォーマットに修正
+    ip_url = f"http://ip-api.com/json/{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
     try:
@@ -60,7 +61,8 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         full_address = "不明または日本国外"
         
         if zip_code and len(zip_code) == 7 and zip_code.isdigit():
-            zip_url = "https://ibsnet.co.jp"
+            # 【修正】正しいzipcloud APIのURLに修正
+            zip_url = "https://zipcloud.ibsnet.co.jp/api/search"
             zip_params = {"zipcode": zip_code}
             try:
                 async with aiohttp.ClientSession() as session:
@@ -115,7 +117,8 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。")
         return
         
-    base_url = "https://ibsnet.co.jp"
+    # 【修正】正しいzipcloud APIのURLを指定
+    base_url = "https://zipcloud.ibsnet.co.jp/api/search"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(base_url, params={"zipcode": clean_zip}) as response:
@@ -143,9 +146,10 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
-        domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
+    domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
     
-    url = f"https://rdap.org{domain}"
+    # 【修正】RDAPの正しいエンドポイントURLに変更
+    url = f"https://rdap.org/domain/{domain}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
@@ -185,13 +189,15 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     headers = {"x-apikey": api_key}
     raw_url = target_url.strip()
     url_id = base64.urlsafe_b64encode(raw_url.encode('utf-8')).decode('utf-8').rstrip("=")
-    api_url = f"https://virustotal.com{url_id}"
+    
+    # 【修正】VirusTotalの正しいAPI v3エンドポイントに修正
+    api_url = f"https://www.virustotal.com/api/v3/urls/{url_id}"
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url, headers=headers) as response:
                 if response.status == 404:
-                    scan_url = "https://virustotal.com"
+                    scan_url = "https://www.virustotal.com/api/v3/urls"
                     async with session.post(scan_url, headers=headers, data={"url": raw_url}) as p_resp:
                         if p_resp.status == 200:
                             await interaction.followup.send("🔄 このURLは初めてチェックされました。現在解析中ですので、数十秒後にもう一度試してください！")
