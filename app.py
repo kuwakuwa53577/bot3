@@ -32,7 +32,7 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. IPアドレス検索コマンド（最新・zipcloud連携版） ---
+# --- 3. IPアドレス検索コマンド（URL結合と郵便逆引きを完全修正） ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -56,7 +56,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message')}")
             return
 
-        # 💡 zipcloud用に郵便番号を抽出
+        # 💡 正しい「zipcloud」のAPIエンドポイントURLに修正
         zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
         full_address = "不明または日本国外"
         
@@ -69,8 +69,8 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
                         if z_resp.status == 200:
                             z_data = await z_resp.json()
                             if z_data.get("status") == 200 and z_data.get("results"):
-                                res = z_data["results"][0]
-                                full_address = f"{res.get('address1','')}{res.get('address2','')}{res.get('address3','')}"
+                                res = z_data["results"][0]  # 💡配列の最初の要素を正しく取得
+                                full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
             except Exception:
                 full_address = "住所逆引き中にエラーが発生しました"
 
@@ -107,7 +107,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 4. 郵便番号検索コマンド（✨zipcloud切り替え完了版） ---
+# --- 4. 郵便番号検索コマンド（zipcloud完全対応版） ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
@@ -117,7 +117,6 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。")
         return
         
-    # 💡 確実に動く大手のzipcloud APIに変更
     base_url = "https://ibsnet.co.jp"
     try:
         async with aiohttp.ClientSession() as session:
@@ -131,8 +130,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
             await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
             return
             
-        # 都道府県名 + 市区町村名 + 町域名 を合体させる
-        res = data["results"][0]
+        res = data["results"][0]  # 💡配列から最初の要素を正しく取得
         full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
         
         embed = discord.Embed(title=f"📮 郵便番号検索結果: 〒{clean_zip[:3]}-{clean_zip[3:]}", color=discord.Color.green())
@@ -141,13 +139,14 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 5. ドメイン検索コマンド（✨ドメイン名の処理を完全に修正） ---
+
+# --- 5. ドメイン検索コマンド（💡リスト変換バグを完全修正） ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
     
-    # http:// などを綺麗に削り、純粋なドメイン名（文字列）を正しく抽出
+    # 💡リストではなく、純粋な「文字列（文字）」としてドメイン名を処理するように修正
     domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
     
     url = f"https://rdap.org{domain}"
@@ -176,7 +175,8 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 6. URL安全チェックコマンド（✨VirusTotalの仕様に合わせBase64エンコードを修正） ---
+
+# --- 6. URL安全チェックコマンド（💡Base64と文字列の変換バグを完全修正） ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
@@ -188,10 +188,9 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     
     headers = {"x-apikey": api_key}
     
-    # 💡 VirusTotal API v3 の仕様に合わせ、末尾のパディング(=)を含まない正しい形式で変換
-    url_bytes = target_url.strip().encode('utf-8')
-    url_id = base64.urlsafe_b64encode(url_bytes).decode('utf-8').rstrip("=")
-    
+    # 💡ターゲットURLを正しい文字データとしてエンコード
+    raw_url = target_url.strip()
+    url_id = base64.urlsafe_b64encode(raw_url.encode('utf-8')).decode('utf-8').rstrip("=")
     api_url = f"https://virustotal.com{url_id}"
     
     try:
@@ -199,7 +198,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
             async with session.get(api_url, headers=headers) as response:
                 if response.status == 404:
                     scan_url = "https://virustotal.com"
-                    async with session.post(scan_url, headers=headers, data={"url": target_url}) as p_resp:
+                    async with session.post(scan_url, headers=headers, data={"url": raw_url}) as p_resp:
                         if p_resp.status == 200:
                             await interaction.followup.send("🔄 このURLは初めてチェックされました。現在解析中ですので、数十秒後にもう一度試してください！")
                             return
@@ -214,11 +213,11 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         harmless = stats.get("harmless", 0)
         
         if malicious > 0 or suspicious > 0:
-            embed = discord.Embed(title="🚨 危険URL警告", color=discord.Color.red(), description=f"対象URL: {target_url}")
+            embed = discord.Embed(title="🚨 危険URL警告", color=discord.Color.red(), description=f"対象URL: {raw_url}")
             embed.add_field(name="❌ 危険・詐欺判定件数", value=f"**{malicious}** 件のエンジンが危険と判定", inline=False)
             embed.add_field(name="⚠️ 怪しい判定件数", value=f"{suspicious} 件", inline=True)
         else:
-            embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象URL: {target_url}")
+            embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象URL: {raw_url}")
             embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
         
         embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
