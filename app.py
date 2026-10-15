@@ -32,7 +32,7 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. IPアドレス検索コマンド（URLバグ完全修正版） ---
+# --- 3. IPアドレス検索コマンド ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -41,7 +41,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
     
-    # 💡 URLの末尾に正しくスラッシュを入れてIPをテキストとして結合
     ip_url = f"http://ip-api.com{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
@@ -61,7 +60,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         full_address = "不明または日本国外"
         
         if zip_code and len(zip_code) == 7 and zip_code.isdigit():
-            # 💡 正しい大手の郵便番号APIを使用
             zip_url = "https://ibsnet.co.jp"
             zip_params = {"zipcode": zip_code}
             try:
@@ -76,7 +74,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
                 full_address = "住所逆引き中にエラーが発生しました"
 
         embed = discord.Embed(title=f"🌐 IPアドレス詳細解析結果: {data.get('query', target_ip)}", color=discord.Color.blue())
-        
         embed.add_field(name="📍 住所・タイムゾーン", value=(
             f"**自動逆引き住所:** {full_address}\n"
             f"**国名:** {data.get('country', '不明')} ({data.get('countryCode', '-')})\n"
@@ -107,7 +104,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 4. 郵便番号検索コマンド（バグ完全修正版） ---
+# --- 4. 郵便番号検索コマンド ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
@@ -139,13 +136,11 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 5. ドメイン検索コマンド（バグ完全修正版） ---
+# --- 5. ドメイン検索コマンド ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
-    
-    # 💡 リストではなく文字列として確実に処理
     domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
     
     url = f"https://rdap.org{domain}"
@@ -174,7 +169,7 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 6. URL安全チェックコマンド（バグ完全修正版） ---
+# --- 6. URL安全チェックコマンド（✨インデントエラーを完全修正） ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
@@ -199,7 +194,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
                             await interaction.followup.send("🔄 このURLは初めてチェックされました。現在解析中ですので、数十秒後にもう一度試してください！")
                             return
                 if response.status != 200:
-                    await interaction.followup.send(f"⚠️ 安全チェックサーバーとの通信に失敗しました。(Status: {response.status})")
+                    await interaction.followup.send(f"⚠️ 安全チェックサーバーとの通信に失敗しました。")
                     return
                 data = await response.json()
         
@@ -214,13 +209,11 @@ async def check_url(interaction: discord.Interaction, target_url: str):
             embed.add_field(name="⚠️ 怪しい判定件数", value=f"{suspicious} 件", inline=True)
         else:
             embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象URL: {raw_url}")
-embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
-embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
-await interaction.followup.send(embed=embed)
-except Exception as e:
-await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
-
---- 7. 起動処理 ---
+            embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
+            embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
+        await interaction.followup.send(embed=embed)
+        except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 if name == "main":
 web_thread = threading.Thread(target=run_web)
