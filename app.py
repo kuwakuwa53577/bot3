@@ -31,8 +31,8 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# --- 3. IPアドレス検索コマンド ---
-@bot.tree.command(name="ip", description="指定されたIPアドレスの国や都市、プロバイダ情報を検索します")
+# --- 3. IPアドレス検索コマンド（全22情報対応版） ---
+@bot.tree.command(name="ip", description="指定されたIPアドレスのすべての情報（22種類）を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
@@ -41,7 +41,12 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     target_ip = ip_address.strip().replace(" ", "")
     base_url = "http://ip-api.com"
     path = f"/json/{target_ip}"
-    params = {"lang": "ja"}
+    
+    # 💡 全22情報を取得するために、すべてのフィールド（fields=66846719）を明示的に要求します
+    params = {
+        "lang": "ja",
+        "fields": "66846719"
+    }
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -55,14 +60,56 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。\n理由: {data.get('message')}")
             return
 
-        embed = discord.Embed(title=f"🌐 IPアドレス検索結果: {target_ip}", color=discord.Color.blue())
-        embed.add_field(name="🌍 国", value=data.get("country", "不明"), inline=True)
-        embed.add_field(name="🏙️ 都道府県/州", value=data.get("regionName", "不明"), inline=True)
-        embed.add_field(name="📍 都市", value=data.get("city", "不明"), inline=True)
-        # 👇 ここにこの1行を追加します！
-        embed.add_field(name="📮 郵便番号", value=data.get("zip", "不明"), inline=True) 
-        embed.add_field(name="🏢 プロバイダ (ISP)", value=data.get("isp", "不明"), inline=False)
+        # 綺麗な青いカード（Embed）を作成
+        embed = discord.Embed(
+            title=f"🌐 IPアドレス詳細解析結果: {data.get('query', target_ip)}", 
+            color=discord.Color.blue(),
+            description="APIから取得できる全22情報を表示しています。"
+        )
 
+        # 🗺️ 1. 位置情報・住所グループ（10情報）
+        embed.add_field(name="📍 住所・タイムゾーン", value=(
+            f"**大陸:** {data.get('continent', '不明')} ({data.get('continentCode', '-')})\n"
+            f"**国名:** {data.get('country', '不明')} ({data.get('countryCode', '-')})\n"
+            f"**都道府県/州:** {data.get('regionName', '不明')} ({data.get('region', '-')})\n"
+            f"**都市:** {data.get('city', '不明')}\n"
+            f"**区・地域:** {data.get('district', 'なし・不明')}\n"
+            f"**郵便番号:** 〒{data.get('zip', '不明')}\n"
+            f"**タイムゾーン:** {data.get('timezone', '不明')}"
+        ), inline=False)
+
+        # 🌐 2. 座標・時間グループ（3情報）
+        embed.add_field(name="🧭 地図・座標・時差", value=(
+            f"**緯度 (Lat):** {data.get('lat', '不明')}\n"
+            f"**経度 (Lon):** {data.get('lon', '不明')}\n"
+            f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間"
+        ), inline=True)
+
+        # 💴 3. 通貨（1情報）
+        embed.add_field(name="💴 通貨", value=f"{data.get('currency', '不明')}", inline=True)
+
+        # 🏢 4. 回線・プロバイダグループ（5情報）
+        embed.add_field(name="🏢 通信会社・ネットワーク", value=(
+            f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
+            f"**組織名 (Org):** {data.get('org', '不明')}\n"
+            f"**AS番号:** {data.get('as', '不明')}\n"
+            f"**AS名:** {data.get('asname', '不明')}"
+        ), inline=False)
+
+        # 🚨 5. 特殊判定グループ（3情報）
+        # Trueなら 🔴、Falseなら 🟢 で直感的にわかりやすく表示します
+        is_mobile = "🔴 モバイル回線 (4G/5G)" if data.get("mobile") else "🟢 固定回線など"
+        is_proxy = "🔴 VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続 (安全)"
+        is_hosting = "🔴 サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
+
+        embed.add_field(name="🚨 特殊な通信の判定", value=(
+            f"**回線種別:** {is_mobile}\n"
+            f"**匿名化ツール:** {is_proxy}\n"
+            f"**ホスティング:** {is_hosting}"
+        ), inline=False)
+
+        await interaction.followup.send(embed=embed)
+        
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
