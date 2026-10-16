@@ -691,87 +691,91 @@ async def lookup_all(interaction: discord.Interaction, target: str):
     embed.set_footer(text="マルチデータソース: ip-api, zipcloud, RDAP, Local DNS")
     await interaction.followup.send(embed=embed)
 
-# --- 15. 管理者専用 メンバー特定・調査コマンド（住所・地域情報拡張版） ---
+# --- 15. 管理者専用 メンバー特定・調査コマンド（修正版） ---
 @bot.tree.command(name="userinfo", description="【管理者専用】特定メンバーの詳細情報やアカウント履歴、プロフィール上の地域を調査します")
 @app_commands.checks.has_permissions(administrator=True) # 管理者権限が必要
 @app_commands.describe(member="調査したいDiscordメンバーを選択してください")
 async def user_info_command(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer(thinking=True, ephemeral=True) # 管理者だけにプライベート表示
     
-    guild = interaction.guild
-    if not guild:
-        await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
-        return
+    try:
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
+            return
 
-    # ロール一覧の作成（@everyone を除く）
-    roles = [role.mention for role in member.roles if role != guild.default_role]
-    roles_str = ", ".join(roles) if roles else "ロールなし"
-    if len(roles_str) > 1024:
-        roles_str = f"合計 {len(member.roles) - 1} 個のロール（文字数制限のため省略）"
+        # ロール一覧の作成（@everyone を除く）
+        roles = [role.mention for role in member.roles if role != guild.default_role]
+        roles_str = ", ".join(roles) if roles else "ロールなし"
+        if len(roles_str) > 1024:
+            roles_str = f"合計 {len(member.roles) - 1} 個のロール（文字数制限のため省略）"
 
-    # アカウント作成日とサーバー参加日を日本語のフォーマットに変換
-    created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
-    joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_text else "不明"
+        # アカウント作成日とサーバー参加日を日本語のフォーマットに変換
+        created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
+        # ※ ここを修正しました (joined_text -> joined_at)
+        joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
 
-    # バッジやボット判定
-    is_bot = "🤖 ボット (Bot)" if member.bot else "👤 一般ユーザー"
-    
-    # 状態（ステータス）の判定
-    status_emoji = {
-        discord.Status.online: "🟢 オンライン",
-        discord.Status.idle: "🟡 退席中",
-        discord.Status.dnd: "🔴 取り込み中",
-        discord.Status.offline: "⚫ オフライン / 非表示"
-    }.get(member.status, "⚪ 不明")
+        # バッジやボット判定
+        is_bot = "🤖 ボット (Bot)" if member.bot else "👤 一般ユーザー"
+        
+        # 状態（ステータス）の判定
+        status_emoji = {
+            discord.Status.online: "🟢 オンライン",
+            discord.Status.idle: "🟡 退席中",
+            discord.Status.dnd: "🔴 取り込み中",
+            discord.Status.offline: "⚫ オフライン / 非表示"
+        }.get(member.status, "⚪ 不明")
 
-    # アクティビティやカスタムステータスから地域・住所の手がかりを探す
-    detected_location = "プロフィールから検出されませんでした"
-    activities = []
-    
-    for activity in member.activities:
-        if isinstance(activity, discord.Game):
-            activities.append(f"🎮 プレイ中: {activity.name}")
-        elif isinstance(activity, discord.Streaming):
-            activities.append(f"📺 配信中: [{activity.name}]({activity.url})")
-        elif isinstance(activity, discord.Spotify):
-            activities.append(f"🎵 Spotify: {activity.title} by {activity.artist}")
-        elif isinstance(activity, discord.CustomActivity):
-            if activity.name:
-                activities.append(f"💬 ステータス: {activity.name}")
-                # カスタムステータスの中に「都」「府」「県」「市」などの住所らしいキーワードがあれば候補として拾う
-                if any(keyword in activity.name for keyword in ["都", "道", "府", "県", "市", "区", "町", "村"]):
-                    detected_location = f"ステータスより推測: `{activity.name}`"
+        # アクティビティやカスタムステータスから地域・住所の手がかりを探す
+        detected_location = "プロフィールから検出されませんでした"
+        activities = []
+        
+        for activity in member.activities:
+            if isinstance(activity, discord.Game):
+                activities.append(f"🎮 プレイ中: {activity.name}")
+            elif isinstance(activity, discord.Streaming):
+                activities.append(f"📺 配信中: [{activity.name}]({activity.url})")
+            elif isinstance(activity, discord.Spotify):
+                activities.append(f"🎵 Spotify: {activity.title} by {activity.artist}")
+            elif isinstance(activity, discord.CustomActivity):
+                if activity.name:
+                    activities.append(f"💬 ステータス: {activity.name}")
+                    if any(keyword in activity.name for keyword in ["都", "道", "府", "県", "市", "区", "町", "村"]):
+                        detected_location = f"ステータスより推測: `{activity.name}`"
 
-    activity_str = "\n".join(activities) if activities else "アクティビティなし"
+        activity_str = "\n".join(activities) if activities else "アクティビティなし"
 
-    # Embedの構築
-    embed = discord.Embed(
-        title=f"🔍 メンバー調査結果: {member.display_name}",
-        color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
-        description=f"対象ユーザー: {member.mention} (`{member.id}`)\n※Discordの仕様上、IPや実住所を直接取得することはできません。以下は公開情報およびステータスからの推定です。"
-    )
-    
-    if member.avatar:
-        embed.set_thumbnail(url=member.avatar.url)
+        # Embedの構築
+        embed = discord.Embed(
+            title=f"🔍 メンバー調査結果: {member.display_name}",
+            color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
+            description=f"対象ユーザー: {member.mention} (`{member.id}`)\n※Discordの仕様上、IPや実住所を直接取得することはできません。以下は公開情報およびステータスからの推定です。"
+        )
+        
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
 
-    embed.add_field(name="📌 基本属性", value=f"**アカウント種別:** {is_bot}\n**現在のステータス:** {status_emoji}", inline=False)
-    embed.add_field(name="📍 地域・住所の手がかり", value=f"### `{detected_location}`", inline=False)
-    embed.add_field(name="📅 日時情報", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
-    embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
-    embed.add_field(name="🎮 アクティビティ", value=activity_str, inline=False)
-    
-    if member.voice and member.voice.channel:
-        embed.add_field(name="🔊 ボイスチャンネル", value=f"参加中: `{member.voice.channel.name}`", inline=False)
+        embed.add_field(name="📌 基本属性", value=f"**アカウント種別:** {is_bot}\n**現在のステータス:** {status_emoji}", inline=False)
+        embed.add_field(name="📍 地域・住所の手がかり", value=f"### `{detected_location}`", inline=False)
+        embed.add_field(name="📅 日時情報", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
+        embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
+        embed.add_field(name="🎮 アクティビティ", value=activity_str, inline=False)
+        
+        if member.voice and member.voice.channel:
+            embed.add_field(name="🔊 ボイスチャンネル", value=f"参加中: `{member.voice.channel.name}`", inline=False)
 
-    embed.set_footer(text=f"実行者: {interaction.user.name} | サーバー名: {guild.name}")
-    await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.set_footer(text=f"実行者: {interaction.user.name} | サーバー名: {guild.name}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        # 万が一エラーが起きても「考え中」で固まらず、エラー内容を管理者だけに通知するように保護
+        await interaction.followup.send(f"⚠️ データの取得中にエラーが発生しました: `{e}`", ephemeral=True)
 
 # エラーハンドリング
 @user_info_command.error
 async def user_info_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ このコマンドはサーバーの管理者のみが使用できます。", ephemeral=True)
-
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
