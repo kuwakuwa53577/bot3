@@ -698,9 +698,11 @@ async def lookup_all(interaction: discord.Interaction, target: str):
     await interaction.followup.send(embed=embed)
 
 
-# --- 16. 管理者専用 Firebase連動 ユーザー位置情報（住所）特定コマンド ---
-@bot.tree.command(name="userinfo", description="【管理者専用】Firebaseの登録IPから対象メンバーの大まかなエリアや住所情報を特定します")
-@app_commands.checks.has_permissions(administrator=True)
+# --- 管理者専用 メンバー位置情報（住所）特定コマンド ---
+@discord_bot.tree.command(name="userinfo", description="【管理者専用】Firebaseの登録IPから対象メンバーの大まかなエリアや住所情報を特定します")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="調査したいDiscordメンバーを選択してください")
 async def user_info_command(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer(thinking=True, ephemeral=True)
@@ -711,17 +713,19 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
             await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
             return
 
-        user_ip = get_user_ip_from_db(member.id)
+        # Firestoreからユーザーデータを取得
+        all_data = load_all_data()
+        user_info = all_data.get(str(member.id), {})
+        user_ip = user_info.get("ip")
         
         ip_location = "不明または未検証"
         detailed_address = "特定不可（IPデータなし）"
         isp_info = "不明"
         google_maps_url = None
 
-        if user_ip and user_ip not in ["データベース未接続", "IP未記録", "IP取得失敗"]:
+        if user_ip:
             ip_url = f"http://ip-api.com/json/{user_ip}"
             ip_params = {"lang": "ja", "fields": "66846719"}
-            
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(ip_url, params=ip_params, timeout=5) as resp:
@@ -751,7 +755,8 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
             except Exception:
                 pass
 
-        roles = [role.mention for role in member.roles if role != guild.default_role]
+        # Discord側の基本情報
+        roles = [r.mention for r in member.roles if r.name != "@everyone"]
         roles_str = ", ".join(roles) if roles else "ロールなし"
         created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
         joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
@@ -766,7 +771,7 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
             embed.set_thumbnail(url=member.avatar.url)
 
         embed.add_field(name="📍 データベースIPに基づく特定住所", value=f"### `{detailed_address if detailed_address != '特定不可（IPデータなし）' else ip_location}`", inline=False)
-        embed.add_field(name="🌐 ネットワーク・ISP情報", value=f"**記録されたIP:** `{user_ip}`\n**推定エリア:** {ip_location}\n**プロバイダ (ISP):** {isp_info}", inline=False)
+        embed.add_field(name="🌐 ネットワーク・ISP情報", value=f"**記録されたIP:** `{user_ip if user_ip else '未登録'}`\n**推定エリア:** {ip_location}\n**プロバイダ (ISP):** {isp_info}", inline=False)
 
         if google_maps_url:
             embed.add_field(name="🗺️ マップ確認", value=f"[推定位置をGoogle Mapsで開く]({google_maps_url})", inline=False)
@@ -779,12 +784,6 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
 
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: `{e}`", ephemeral=True)
-
-@user_info_command.error
-async def user_info_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("❌ このコマンドはサーバーの管理者のみが使用できます。", ephemeral=True)
-
 
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
