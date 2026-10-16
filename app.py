@@ -23,8 +23,6 @@ intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True 
 
-# 自動で「いいね」を付けたいチャンネルのIDを設定してください
-# 環境変数から取得するか、直接チャンネルIDの数字を書き込んでください
 TARGET_REACTION_CHANNEL_ID = int(os.environ.get("TARGET_REACTION_CHANNEL_ID", "0"))
 
 class ReactionRolePersistentView(discord.ui.View):
@@ -50,26 +48,21 @@ async def on_ready():
 # --- 自動イイネ（リアクション）機能 ---
 @bot.event
 async def on_message(message: discord.Message):
-    # ボット自身のメッセージや、サーバー外（DMなど）は無視する
     if message.author.bot or not message.guild:
         return
 
-    # 指定されたチャンネルIDと一致する場合のみリアクションを付与
-    # TARGET_REACTION_CHANNEL_ID が 0 の場合は機能しません
     if TARGET_REACTION_CHANNEL_ID != 0 and message.channel.id == TARGET_REACTION_CHANNEL_ID:
         try:
-            # 「👍」の絵文字を自動で追加する
             await message.add_reaction("👍")
         except discord.Forbidden:
-            print("❌ リアクションを追加する権限がありません（「リアクションの追加」権限を確認してください）。")
+            print("❌ リアクションを追加する権限がありません。")
         except Exception as e:
             print(f"⚠️ リアクション付与中にエラーが発生しました: {e}")
 
-    # これがないと他のコマンド（/ipや/zipなど）が反応しなくなるため必須です
     await bot.process_commands(message)
 
 
-# --- 3. IPアドレス検索コマンド ---
+# --- 3. IPアドレス検索コマンド（詳細情報をすべて表示するように修正版） ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -110,7 +103,10 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             except Exception:
                 full_address = "住所逆引き中にエラーが発生しました"
 
+        # 埋め込み（Embed）を作成
         embed = discord.Embed(title=f"🌐 IPアドレス詳細解析結果: {data.get('query', target_ip)}", color=discord.Color.blue())
+        
+        # 1. 住所・タイムゾーン
         embed.add_field(name="📍 住所・タイムゾーン", value=(
             f"**自動逆引き住所:** {full_address}\n"
             f"**国名:** {data.get('country', '不明')} ({data.get('countryCode', '-')})\n"
@@ -119,6 +115,27 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             f"**郵便番号:** 〒{data.get('zip', '不明')}\n"
             f"**タイムゾーン:** {data.get('timezone', '不明')}"
         ), inline=False)
+
+        # 2. 座標・時差・通貨
+        embed.add_field(name="🧭 座標・時差・通貨", value=(
+            f"**緯度/経度:** {data.get('lat', '-')}, {data.get('lon', '-')}\n"
+            f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間\n"
+            f"**使用通貨:** {data.get('currency', '不明')}"
+        ), inline=False)
+
+        # 3. 通信会社・ネットワーク
+        embed.add_field(name="🏢 通信会社・ネットワーク", value=(
+            f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
+            f"**組織名 (Org):** {data.get('org', '不明')}\n"
+            f"**AS番号/名:** {data.get('as', '不明')} / {data.get('asname', '不明')}"
+        ), inline=False)
+
+        # 4. 特殊回線判定
+        is_mobile = "🔴 モバイル回線 (4G/5G)" if data.get("mobile") else "🟢 固定回線など"
+        is_proxy = "🔴 VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
+        is_hosting = "🔴 サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
+        embed.add_field(name="🚨 特殊回線判定", value=f"**回線種類:** {is_mobile}\n**匿名ツール:** {is_proxy}\n**ホスティング:** {is_hosting}", inline=False)
+
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
