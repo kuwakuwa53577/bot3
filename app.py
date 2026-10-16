@@ -250,7 +250,7 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 6. DNSレコード検索コマンド（新しく追加） ---
+# --- 6. DNSレコード検索コマンド ---
 @bot.tree.command(name="dns", description="指定されたドメインのIPアドレスやDNS情報を解決します")
 @app_commands.describe(domain_name="検索したいドメイン名（例: example.com）")
 async def lookup_dns(interaction: discord.Interaction, domain_name: str):
@@ -332,7 +332,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 8. 複数ロール対応リアクションロール設置コマンド ---
+# --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
         super().__init__(style=discord.ButtonStyle.primary, label=label, emoji=emoji, custom_id=f"rr_{role_id}")
@@ -358,31 +358,47 @@ class MultiReactionRoleButton(discord.ui.Button):
                 await member.add_roles(role)
                 await interaction.response.send_message(f"🎉 ロール **{role.name}** を付与しました！", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ ボットの権限（ロールの管理）または階調が不足しています。", ephemeral=True)
+            await interaction.response.send_message("❌ ボットの権限（ロールの管理）が不足しています。", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"⚠️ エラーが発生しました: {e}", ephemeral=True)
 
-@bot.tree.command(name="reactionrole", description="最大3つのロールを同時に付与できるボタンパネルを設置します")
+@bot.tree.command(name="reactionrole", description="最大6つのロールを同時に付与できるボタンパネルを設置します")
 @app_commands.describe(
+    title="パネルのタイトル（省略時はデフォルト）",
+    description="パネルの説明文（省略時はデフォルト）",
     role1="1つ目のロール", label1="1つ目のボタン名", emoji1="1つ目の絵文字（任意）",
     role2="2つ目のロール（任意）", label2="2つ目のボタン名（任意）", emoji2="2つ目の絵文字（任意）",
-    role3="3つ目のロール（任意）", label3="3つ目のボタン名（任意）", emoji3="3つ目の絵文字（任意）"
+    role3="3つ目のロール（任意）", label3="3つ目のボタン名（任意）", emoji3="3つ目の絵文字（任意）",
+    role4="4つ目のロール（任意）", label4="4つ目のボタン名（任意）", emoji4="4つ目の絵文字（任意）",
+    role5="5つ目のロール（任意）", label5="5つ目のボタン名（任意）", emoji5="5つ目の絵文字（任意）",
+    role6="6つ目のロール（任意）", label6="6つ目のボタン名（任意）", emoji6="6つ目の絵文字（任意）"
 )
 async def reactionrole_command(
     interaction: discord.Interaction, 
-    role1: discord.Role, label1: str, emoji1: str = None,
+    title: str = "📌 マルチロール取得パネル",
+    description: str = "下のボタンを押して、それぞれのロールの取得・解除を行ってください。",
+    role1: discord.Role = None, label1: str = None, emoji1: str = None,
     role2: discord.Role = None, label2: str = None, emoji2: str = None,
-    role3: discord.Role = None, label3: str = None, emoji3: str = None
+    role3: discord.Role = None, label3: str = None, emoji3: str = None,
+    role4: discord.Role = None, label4: str = None, emoji4: str = None,
+    role5: discord.Role = None, label5: str = None, emoji5: str = None,
+    role6: discord.Role = None, label6: str = None, emoji6: str = None
 ):
     if not interaction.user.guild_permissions.manage_roles:
         await interaction.response.send_message("❌ このコマンドを実行するには「ロールの管理」権限が必要です。", ephemeral=True)
         return
 
+    roles_info = [
+        (role1, label1, emoji1), (role2, label2, emoji2), (role3, label3, emoji3),
+        (role4, label4, emoji4), (role5, label5, emoji5), (role6, label6, emoji6)
+    ]
+    
     selected_roles = []
-    roles_info = [(role1, label1, emoji1), (role2, label2, emoji2), (role3, label3, emoji3)]
+    active_roles_count = 0
 
     for role, label, emoji in roles_info:
         if role is not None:
+            active_roles_count += 1
             if label is None:
                 await interaction.response.send_message(f"❌ ロール「{role.name}」に対してボタンのテキスト（label）が指定されていません。", ephemeral=True)
                 return
@@ -392,8 +408,11 @@ async def reactionrole_command(
             if role.position >= interaction.guild.me.top_role.position:
                 await interaction.response.send_message(f"❌ ロール「{role.name}」は私のロールより権限が上のため付与できません。", ephemeral=True)
                 return
-            
             selected_roles.append(role.id)
+
+    if active_roles_count == 0:
+        await interaction.response.send_message("❌ 最低1つのロールを指定してください。", ephemeral=True)
+        return
 
     view = discord.ui.View(timeout=None)
     for role, label, emoji in roles_info:
@@ -401,13 +420,13 @@ async def reactionrole_command(
             view.add_item(MultiReactionRoleButton(role_id=role.id, label=label, emoji=emoji))
 
     embed = discord.Embed(
-        title="📌 マルチロール取得パネル",
-        description="下のボタンを押して、それぞれのロールの取得・解除を行ってください。",
+        title=title,
+        description=description,
         color=discord.Color.blue()
     )
 
     await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ 複数ロール対応のパネルを設置しました！", ephemeral=True)
+    await interaction.response.send_message("✅ 最大6個のボタンを持つマルチロールパネルを設置しました！", ephemeral=True)
 
 
 # --- 9. 起動処理 ---
@@ -418,6 +437,6 @@ if __name__ == "__main__":
 
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
-        print("❌ エラー: DISCORD_TOKEN が設定されていません。")
+        print("❌ エລະ: DISCORD_TOKEN が設定されていません。")
     else:
         bot.run(token)
