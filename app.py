@@ -23,109 +23,27 @@ intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True # メンバー情報を取得するため必要です
 
-# --- リアクションロール用の永続ボタンクラス ---
-class ReactionRoleButton(discord.ui.Button):
-    def __init__(self, role_id: int, label: str, emoji=None):
-        # custom_idに "rr_ロールID" を持たせることで永続化に対応
-        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji=emoji, custom_id=f"rr_{role_id}")
-        self.role_id = role_id
-
-    async def callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        if not guild:
-            await interaction.response.send_message("❌ このコマンドはサーバー内で実行してください。", ephemeral=True)
-            return
-
-        role = guild.get_role(self.role_id)
-        if not role:
-            await interaction.response.send_message("❌ 対象のロールが見つかりませんでした（削除された可能性があります）。", ephemeral=True)
-            return
-
-        member = interaction.user
-        try:
-            if role in member.roles:
-                await member.remove_roles(role)
-                await interaction.response.send_message(f"✅ ロール **{role.name}** を外しました。", ephemeral=True)
-            else:
-                await member.add_roles(role)
-                await interaction.response.send_message(f"🎉 ロール **{role.name}** を付与しました！", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ ボットにロールを管理する権限（ロールの管理）または十分な階調がありません。", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"⚠️ エラーが発生しました: {e}", ephemeral=True)
-
-class ReactionRoleView(discord.ui.View):
+# --- 永続ビューの安全な再登録用クラス（複数のロールボタンに対応） ---
+class ReactionRolePersistentView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None) # タイムアウトなし（永続）
+        super().__init__(timeout=None)
 
+# 起動時のボットクラス
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        # ボット再起動後もボタンを機能させるための永続ビューを登録
-        # ※ どのロールIDのボタンがあっても動くようにプレフィックス監視を登録します
-        # 実際にはカスタムIDから動的にボタンを復元させます
-        pass
+        # 永続ビューを登録
+        bot.add_view(ReactionRolePersistentView())
 
 bot = MyBot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    
-    # 起動時に既存メッセージのリアクションロールボタンを再登録する処理（永続化の要）
-    # custom_idが "rr_" で始まるボタンを自動検知してビューに追加します
-    for guild in bot.guilds:
-        # ボットが参加しているサーバー内の過去メッセージから再登録が必要な場合はここに記述できますが、
-        # discord.pyでは view に timeout=None を指定したクラスをあらかじめ add_viewしておく必要があります。
-        pass
-
-    # 簡易的に、任意のロールIDに対応できるようにダミーのカスタムIDを持つビューを登録するか、
-    # あるいはコールバック内で動的に処理させるための汎用リスナーを仕込みます。
-    # ここでは確実に動くよう、ボタンが押されたときに動的なボタンクラスを紐付けるアプローチをとります。
-    
-    # 今回はシンプルに、起動時に汎用ビューを追加登録しておきます
-    bot.add_view(ReactionRolePersistentView())
-
     try:
         synced = await bot.tree.sync()
         print(f"Successfully synced {len(synced)} command(s).")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
-
-# 永続ビューの安全な再登録用クラス
-class ReactionRolePersistentView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="ロール読込中...", custom_id="rr_dummy_placeholder", style=discord.ButtonStyle.secondary)
-    async def dummy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 実際にパネルで設置されたボタンは動的に生成されますが、
-        # 永続化を安定させるため、クリックされたカスタムIDからロールIDを解析して処理します
-        custom_id = button.custom_id
-        if not custom_id.startswith("rr_"):
-            return
-        
-        try:
-            role_id = int(custom_id.split("_")[1])
-        except ValueError:
-            await interaction.response.send_message("❌ ロールIDの解析に失敗しました。", ephemeral=True)
-            return
-
-        guild = interaction.guild
-        role = guild.get_role(role_id)
-        if not role:
-            await interaction.response.send_message("❌ 対象のロールが見つかりませんでした。", ephemeral=True)
-            return
-
-        member = interaction.user
-        try:
-            if role in member.roles:
-                await member.remove_roles(role)
-                await interaction.response.send_message(f"✅ ロール **{role.name}** を外しました。", ephemeral=True)
-            else:
-                await member.add_roles(role)
-                await interaction.response.send_message(f"🎉 ロール **{role.name}** を付与しました！", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ ボットの権限不足によりロールを変更できません。", ephemeral=True)
 
 
 # --- 3. IPアドレス検索コマンド（zipcloudのcontent_type対策済み） ---
@@ -340,32 +258,73 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 7. リアクションロール設置コマンドの追加 ---
-@bot.tree.command(name="reactionrole", description="指定したロールを付与・剥奪できるボタンパネルを設置します")
-@app_commands.describe(role="付与・剥奪するロール", label="ボタンのテキスト", emoji="ボタンの絵文字（任意、例: 🔔）")
-async def reactionrole_command(interaction: discord.Interaction, role: discord.Role, label: str, emoji: str = None):
-    # 管理者権限またはサーバー管理権限のチェック
+# --- 7. 複数ロール対応リアクションロール設置コマンド ---
+class MultiReactionRoleButton(discord.ui.Button):
+    def __init__(self, role_id: int, label: str, emoji=None):
+        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji=emoji, custom_id=f"rr_{role_id}")
+        self.role_id = role_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("❌ サーバー内で実行してください。", ephemeral=True)
+            return
+
+        role = guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ 対象のロールが見つかりませんでした。", ephemeral=True)
+            return
+
+        member = interaction.user
+        try:
+            if role in member.roles:
+                await member.remove_roles(role)
+                await interaction.response.send_message(f"✅ ロール **{role.name}** を外しました。", ephemeral=True)
+            else:
+                await member.add_roles(role)
+                await interaction.response.send_message(f"🎉 ロール **{role.name}** を付与しました！", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ ボットの権限（ロールの管理）または階調が不足しています。", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ エラーが発生しました: {e}", ephemeral=True)
+
+@bot.tree.command(name="reactionrole", description="最大3つのロールを同時に付与できるボタンパネルを設置します")
+@app_commands.describe(
+    role1="1つ目のロール", label1="1つ目のボタン名", emoji1="1つ目の絵文字（任意）",
+    role2="2つ目のロール（任意）", label2="2つ目のボタン名（任意）", emoji2="2つ目の絵文字（任意）",
+    role3="3つ目のロール（任意）", label3="3つ目のボタン名（任意）", emoji3="3つ目の絵文字（任意）"
+)
+async def reactionrole_command(
+    interaction: discord.Interaction, 
+    role1: discord.Role, label1: str, emoji1: str = None,
+    role2: discord.Role = None, label2: str = None, emoji2: str = None,
+    role3: discord.Role = None, label3: str = None, emoji3: str = None
+):
     if not interaction.user.guild_permissions.manage_roles:
         await interaction.response.send_message("❌ このコマンドを実行するには「ロールの管理」権限が必要です。", ephemeral=True)
         return
 
-    # ボット自身のロールより付与したいロールが上にある場合のエラー防止
-    if role.position >= interaction.guild.me.top_role.position:
-        await interaction.response.send_message("❌ そのロールは私のロールより権限が上のため付与できません。ボットのロール位置を上に移動させてください。", ephemeral=True)
-        return
-
-    # ボタンとビューを作成（カスタムIDにロールIDを埋め込む）
     view = discord.ui.View(timeout=None)
-    view.add_item(ReactionRoleButton(role_id=role.id, label=label, emoji=emoji))
+    roles_info = [(role1, label1, emoji1), (role2, label2, emoji2), (role3, label3, emoji3)]
+
+    for role, label, emoji in roles_info:
+        if role is not None:
+            if label is None:
+                await interaction.response.send_message(f"❌ ロール「{role.name}」に対してボタンのテキスト（label）が指定されていません。", ephemeral=True)
+                return
+            if role.position >= interaction.guild.me.top_role.position:
+                await interaction.response.send_message(f"❌ ロール「{role.name}」は私のロールより権限が上のため付与できません。", ephemeral=True)
+                return
+            view.add_item(MultiReactionRoleButton(role_id=role.id, label=label, emoji=emoji))
 
     embed = discord.Embed(
-        title="📌 ロール取得パネル",
-        description=f"下のボタンを押して、**{role.name}** ロールの取得・解除を行ってください。",
+        title="📌 マルチロール取得パネル",
+        description="下のボタンを押して、それぞれのロールの取得・解除を行ってください。",
         color=discord.Color.blue()
     )
 
     await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ リアクションロールパネルを設置しました！", ephemeral=True)
+    await interaction.response.send_message("✅ 複数ロール対応のパネルを設置しました！", ephemeral=True)
 
 
 # --- 8. 起動処理 ---
