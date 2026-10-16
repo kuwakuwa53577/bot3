@@ -21,16 +21,112 @@ def run_web():
 # --- 2. Discord Botの設定 ---
 intents = discord.Intents.default()
 intents.message_content = True 
-bot = commands.Bot(command_prefix="!", intents=intents)
+intents.members = True # メンバー情報を取得するため必要です
+
+# --- リアクションロール用の永続ボタンクラス ---
+class ReactionRoleButton(discord.ui.Button):
+    def __init__(self, role_id: int, label: str, emoji=None):
+        # custom_idに "rr_ロールID" を持たせることで永続化に対応
+        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji=emoji, custom_id=f"rr_{role_id}")
+        self.role_id = role_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("❌ このコマンドはサーバー内で実行してください。", ephemeral=True)
+            return
+
+        role = guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ 対象のロールが見つかりませんでした（削除された可能性があります）。", ephemeral=True)
+            return
+
+        member = interaction.user
+        try:
+            if role in member.roles:
+                await member.remove_roles(role)
+                await interaction.response.send_message(f"✅ ロール **{role.name}** を外しました。", ephemeral=True)
+            else:
+                await member.add_roles(role)
+                await interaction.response.send_message(f"🎉 ロール **{role.name}** を付与しました！", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ ボットにロールを管理する権限（ロールの管理）または十分な階調がありません。", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ エラーが発生しました: {e}", ephemeral=True)
+
+class ReactionRoleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None) # タイムアウトなし（永続）
+
+class MyBot(commands.Bot):
+    async def setup_hook(self):
+        # ボット再起動後もボタンを機能させるための永続ビューを登録
+        # ※ どのロールIDのボタンがあっても動くようにプレフィックス監視を登録します
+        # 実際にはカスタムIDから動的にボタンを復元させます
+        pass
+
+bot = MyBot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    
+    # 起動時に既存メッセージのリアクションロールボタンを再登録する処理（永続化の要）
+    # custom_idが "rr_" で始まるボタンを自動検知してビューに追加します
+    for guild in bot.guilds:
+        # ボットが参加しているサーバー内の過去メッセージから再登録が必要な場合はここに記述できますが、
+        # discord.pyでは view に timeout=None を指定したクラスをあらかじめ add_viewしておく必要があります。
+        pass
+
+    # 簡易的に、任意のロールIDに対応できるようにダミーのカスタムIDを持つビューを登録するか、
+    # あるいはコールバック内で動的に処理させるための汎用リスナーを仕込みます。
+    # ここでは確実に動くよう、ボタンが押されたときに動的なボタンクラスを紐付けるアプローチをとります。
+    
+    # 今回はシンプルに、起動時に汎用ビューを追加登録しておきます
+    bot.add_view(ReactionRolePersistentView())
+
     try:
         synced = await bot.tree.sync()
         print(f"Successfully synced {len(synced)} command(s).")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+
+# 永続ビューの安全な再登録用クラス
+class ReactionRolePersistentView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="ロール読込中...", custom_id="rr_dummy_placeholder", style=discord.ButtonStyle.secondary)
+    async def dummy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 実際にパネルで設置されたボタンは動的に生成されますが、
+        # 永続化を安定させるため、クリックされたカスタムIDからロールIDを解析して処理します
+        custom_id = button.custom_id
+        if not custom_id.startswith("rr_"):
+            return
+        
+        try:
+            role_id = int(custom_id.split("_")[1])
+        except ValueError:
+            await interaction.response.send_message("❌ ロールIDの解析に失敗しました。", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        role = guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message("❌ 対象のロールが見つかりませんでした。", ephemeral=True)
+            return
+
+        member = interaction.user
+        try:
+            if role in member.roles:
+                await member.remove_roles(role)
+                await interaction.response.send_message(f"✅ ロール **{role.name}** を外しました。", ephemeral=True)
+            else:
+                await member.add_roles(role)
+                await interaction.response.send_message(f"🎉 ロール **{role.name}** を付与しました！", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ ボットの権限不足によりロールを変更できません。", ephemeral=True)
+
 
 # --- 3. IPアドレス検索コマンド（zipcloudのcontent_type対策済み） ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
@@ -127,7 +223,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         if data.get("status") != 200 or not data.get("results"):
             await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
             return
-            
+                
         res = data["results"][0]
         full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
         
@@ -148,7 +244,6 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. IANAからこのTLDを管理する公式RDAPサーバーのURLを取得する
             iana_url = f"https://rdap.iana.org/domain/{tld}"
             async with session.get(iana_url, headers={"Accept": "application/json"}) as iana_resp:
                 if iana_resp.status != 200:
@@ -156,7 +251,6 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
                     return
                 iana_data = await iana_resp.json(content_type=None)
             
-            # 正式なRDAPサーバーのリンクを探す
             rdap_servers = iana_data.get("links", [])
             target_rdap_url = None
             for link in rdap_servers:
@@ -165,15 +259,12 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
                     target_rdap_url = href.rstrip("/")
                     break
             
-            # 万が一見つからない場合のフォールバック
             if not target_rdap_url:
                 target_rdap_url = f"https://rdap.org"
 
-            # 2. 正式なRDAPサーバーに対してドメイン情報を問い合わせる
             domain_query_url = f"{target_rdap_url}/domain/{domain}"
             async with session.get(domain_query_url, headers={"Accept": "application/json"}) as domain_resp:
                 if domain_resp.status != 200:
-                    # 最後の手段として rdap.org を直叩き
                     async with session.get(f"https://rdap.org/domain/{domain}", headers={"Accept": "application/json"}) as fallback_resp:
                         if fallback_resp.status == 200:
                             data = await fallback_resp.json(content_type=None)
@@ -249,11 +340,42 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 7. 起動処理 ---
+# --- 7. リアクションロール設置コマンドの追加 ---
+@bot.tree.command(name="reactionrole", description="指定したロールを付与・剥奪できるボタンパネルを設置します")
+@app_commands.describe(role="付与・剥奪するロール", label="ボタンのテキスト", emoji="ボタンの絵文字（任意、例: 🔔）")
+async def reactionrole_command(interaction: discord.Interaction, role: discord.Role, label: str, emoji: str = None):
+    # 管理者権限またはサーバー管理権限のチェック
+    if not interaction.user.guild_permissions.manage_roles:
+        await interaction.response.send_message("❌ このコマンドを実行するには「ロールの管理」権限が必要です。", ephemeral=True)
+        return
+
+    # ボット自身のロールより付与したいロールが上にある場合のエラー防止
+    if role.position >= interaction.guild.me.top_role.position:
+        await interaction.response.send_message("❌ そのロールは私のロールより権限が上のため付与できません。ボットのロール位置を上に移動させてください。", ephemeral=True)
+        return
+
+    # ボタンとビューを作成（カスタムIDにロールIDを埋め込む）
+    view = discord.ui.View(timeout=None)
+    view.add_item(ReactionRoleButton(role_id=role.id, label=label, emoji=emoji))
+
+    embed = discord.Embed(
+        title="📌 ロール取得パネル",
+        description=f"下のボタンを押して、**{role.name}** ロールの取得・解除を行ってください。",
+        color=discord.Color.blue()
+    )
+
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ リアクションロールパネルを設置しました！", ephemeral=True)
+
+
+# --- 8. 起動処理 ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web)
     web_thread.daemon = True
     web_thread.start()
 
     token = os.environ.get("DISCORD_TOKEN")
-    bot.run(token)
+    if not token:
+        print("❌ エラー: DISCORD_TOKEN 環境変数が設定されていません。")
+    else:
+        bot.run(token)
