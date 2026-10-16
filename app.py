@@ -1,5 +1,7 @@
 import os
 import threading
+import socket
+import asyncio
 import aiohttp
 import discord
 from discord.ext import commands
@@ -63,7 +65,7 @@ async def on_message(message: discord.Message):
 
 
 # --- 3. IPアドレス検索コマンド ---
-@bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
+@bot.tree.command(name="ip", description="指定されたIPアドレスの詳細情報を徹底的に解析します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
@@ -85,6 +87,12 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         if data.get("status") == "fail":
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message')}")
             return
+
+        try:
+            hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
+            hostname_str = hostname[0]
+        except Exception:
+            hostname_str = "逆引きできませんでした（PTRレコードなし）"
 
         zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
         full_address = "不明または日本国外"
@@ -118,14 +126,15 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             f"**使用通貨:** {data.get('currency', '不明')}"
         ), inline=False)
         embed.add_field(name="🏢 通信会社・ネットワーク", value=(
+            f"**ホスト名 (PTR):** `{hostname_str}`\n"
             f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
             f"**組織名 (Org):** {data.get('org', '不明')}\n"
             f"**AS番号/名:** {data.get('as', '不明')} / {data.get('asname', '不明')}"
         ), inline=False)
         is_mobile = "🔴 モバイル回線 (4G/5G)" if data.get("mobile") else "🟢 固定回線など"
-        is_proxy = "🔴 VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
-        is_hosting = "🔴 サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
-        embed.add_field(name="🚨 特殊回線判定", value=f"**回線種類:** {is_mobile}\n**匿名ツール:** {is_proxy}\n**ホスティング:** {is_hosting}", inline=False)
+        is_proxy = "⚠️ VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
+        is_hosting = "⚠️ サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
+        embed.add_field(name="🚨 特殊回線・脅威判定", value=f"**回線種類:** {is_mobile}\n**匿名ツール:** {is_proxy}\n**ホスティング:** {is_hosting}", inline=False)
 
         await interaction.followup.send(embed=embed)
     except Exception as e:
@@ -133,7 +142,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
 
 
 # --- 4. 郵便番号検索コマンド ---
-@bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所・ローマ字情報を検索します")
+@bot.tree.command(name="zip", description="日本の郵便番号から行政コードや詳細な住所情報を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     await interaction.response.defer(thinking=True)
@@ -169,10 +178,10 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         kana3 = res.get('kana3', '')
         full_kana = f"{kana1} {kana2} {kana3}"
 
-        embed = discord.Embed(title=f"📮 郵便番号詳細検索結果: 〒{zip7[:3]}-{zip7[3:]}", color=discord.Color.green())
-        embed.add_field(name="📍 住所情報", value=(
+        embed = discord.Embed(title=f"📮 郵便番号詳細解析結果: 〒{zip7[:3]}-{zip7[3:]}", color=discord.Color.green())
+        embed.add_field(name="📍 住所・行政コード情報", value=(
             f"**完全な住所:** {full_address}\n"
-            f"**都道府県:** {address1} (コード: {pref_code})\n"
+            f"**都道府県:** {address1} (JIS都道府県コード: {pref_code})\n"
             f"**市区町村:** {address2}\n"
             f"**町域:** {address3 if address3 else '指定なし'}"
         ), inline=False)
@@ -241,7 +250,44 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 6. URL安全チェックコマンド ---
+# --- 6. DNSレコード検索コマンド（新しく追加） ---
+@bot.tree.command(name="dns", description="指定されたドメインのIPアドレスやDNS情報を解決します")
+@app_commands.describe(domain_name="検索したいドメイン名（例: example.com）")
+async def lookup_dns(interaction: discord.Interaction, domain_name: str):
+    await interaction.response.defer(thinking=True)
+    target = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
+    
+    try:
+        addr_info = await asyncio.to_thread(socket.getaddrinfo, target, None)
+        
+        ipv4_list = set()
+        ipv6_list = set()
+        
+        for family, _, _, _, sockaddr in addr_info:
+            if family == socket.AF_INET:
+                ipv4_list.add(sockaddr[0])
+            elif family == socket.AF_INET6:
+                ipv6_list.add(sockaddr[0])
+        
+        try:
+            hostname = await asyncio.to_thread(socket.gethostbyaddr, list(ipv4_list)[0] if ipv4_list else target)
+            ptr_name = hostname[0]
+        except Exception:
+            ptr_name = "逆引きなし"
+
+        embed = discord.Embed(title=f"🔍 DNS解決結果: {target}", color=discord.Color.gold())
+        embed.add_field(name="🌐 IPv4アドレス (Aレコード)", value="\n".join(ipv4_list) if ipv4_list else "見つかりませんでした", inline=False)
+        embed.add_field(name="🌍 IPv6アドレス (AAAAレコード)", value="\n".join(ipv6_list) if ipv6_list else "見つかりませんでした", inline=False)
+        embed.add_field(name="🔄 ホスト名 (PTR)", value=f"`{ptr_name}`", inline=False)
+        
+        await interaction.followup.send(embed=embed)
+    except socket.gaierror:
+        await interaction.followup.send(f"⚠️ 指定されたドメイン `{target}` のIPアドレスを解決できませんでした。")
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+
+# --- 7. URL安全チェックコマンド ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
 @app_commands.describe(target_url="チェックしたいURL（例: http://example.com）")
 async def check_url(interaction: discord.Interaction, target_url: str):
@@ -286,7 +332,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 7. 複数ロール対応リアクションロール設置コマンド ---
+# --- 8. 複数ロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
         super().__init__(style=discord.ButtonStyle.primary, label=label, emoji=emoji, custom_id=f"rr_{role_id}")
@@ -364,7 +410,7 @@ async def reactionrole_command(
     await interaction.response.send_message("✅ 複数ロール対応のパネルを設置しました！", ephemeral=True)
 
 
-# --- 8. 起動処理 ---
+# --- 9. 起動処理 ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web)
     web_thread.daemon = True
