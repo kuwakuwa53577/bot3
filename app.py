@@ -399,6 +399,106 @@ async def check_status(interaction: discord.Interaction):
         
     except Exception as e:
         await interaction.followup.send(f"⚠️ 障害情報の構築中にエラーが発生しました: {e}")
+
+# --- 11. テンポラリーボイスチャンネル機能の設定 ---
+# ※あらかじめDiscord上で「部屋作成用」のボイスチャンネルを作成し、そのIDを環境変数または変数に設定してください
+TARGET_CREATE_VC_ID = int(os.environ.get("TARGET_CREATE_VC_ID", "0"))
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if TARGET_CREATE_VC_ID == 0:
+        return
+
+    # 1. ユーザーが「作成用チャンネル」に参加したとき
+    if after.channel and after.channel.id == TARGET_CREATE_VC_ID:
+        guild = member.guild
+        category = after.channel.category  # 同じカテゴリ内に作成する
+        
+        # チャンネル名を設定
+        channel_name = f"💬│{member.display_name}の部屋"
+        
+        # 権限を設定（本人と管理者だけが入れるようにする）
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(connect=False),
+            member: discord.PermissionOverwrite(connect=True, manage_channels=True, mute_members=True)
+        }
+        
+        try:
+            # 新しいボイスチャンネルを作成
+            new_channel = await guild.create_voice_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                user_limit=5  # 必要に応じて人数制限（例: 5人まで）
+            )
+            # ユーザーを新しいチャンネルに移動
+            await member.move_to(new_channel)
+        except Exception as e:
+            print(f"⚠️ 一時ボイスチャンネル作成エラー: {e}")
+
+    # 2. ユーザーがボイスチャンネルから退出したとき（空になったカスタム部屋を削除）
+    if before.channel and before.channel.id != TARGET_CREATE_VC_ID:
+        # 作成用チャンネルと同じカテゴリ、かつ名前が特定の形式で、誰もいなくなったら削除
+        if before.channel.category and before.channel.category == after.channel.category if after and after.channel else True:
+            if "の部屋" in before.channel.name and len(before.channel.members) == 0:
+                try:
+                    await before.channel.delete()
+                except Exception as e:
+                    print(f"⚠️ 一時ボイスチャンネル削除エラー: {e}")
+
+
+# --- 12. 2人きりのプライベートチャンネル作成コマンド ---
+@bot.tree.command(name="private", description="指定したユーザーとあなただけの秘密のテキストチャンネルを作成します")
+@app_commands.describe(target_user="一緒に話したいユーザー")
+async def create_private_room(interaction: discord.Interaction, target_user: discord.Member):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    guild = interaction.guild
+    
+    if not guild:
+        await interaction.followup.send("❌ このコマンドはサーバー内で実行してください。")
+        return
+        
+    if target_user.bot:
+        await interaction.followup.send("❌ ボットを指定することはできません。")
+        return
+        
+    if target_user.id == interaction.user.id:
+        await interaction.followup.send("❌ 自分自身を指定することはできません。")
+        return
+
+    # チャンネル名
+    channel_name = f"🔒│{interaction.user.name}-{target_user.name}"
+    
+    # 権限設定（サーバーの一般メンバーには非表示、実行者と指定された相手、および管理者だけが見られる）
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+        target_user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+    }
+    
+    try:
+        # チャンネルを作成（現在のチャンネルと同じカテゴリに配置）
+        category = interaction.channel.category if hasattr(interaction.channel, 'category') else None
+        private_channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            topic=f"{interaction.user.mention} と {target_user.mention} のプライベートチャンネル"
+        )
+        
+        # 作成したチャンネルに案内を送信
+        await private_channel.send(
+            f"🔐 **プライベートチャンネルを作成しました！**\n"
+            f"{interaction.user.mention} さんと {target_user.mention} さんだけが閲覧・書き込みできます。"
+        )
+        
+        await interaction.followup.send(f"✅ プライベートチャンネルを作成しました: {private_channel.mention}")
+    except discord.Forbidden:
+        await interaction.followup.send("❌ ボットに「チャンネルの管理」権限がありません。")
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
