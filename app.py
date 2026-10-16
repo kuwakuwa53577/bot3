@@ -331,34 +331,31 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# --- 10. Discord & GitHub 障害状況確認コマンド ---
-@bot.tree.command(name="status", description="DiscordとGitHubの現在の障害状況や稼働ステータスを確認します")
+# --- 10. 主要サービス（Discord, GitHub, Cloudflare, Render）の障害状況確認コマンド ---
+@bot.tree.command(name="status", description="Discord, GitHub, Cloudflare, Renderの障害状況や稼働ステータスを確認します")
 async def check_status(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     
-    discord_status_url = "https://discordstatus.com/api/v2/summary.json"
-    github_status_url = "https://www.githubstatus.com/api/v2/summary.json"
+    urls = {
+        "discord": "https://discordstatus.com/api/v2/summary.json",
+        "github": "https://www.githubstatus.com/api/v2/summary.json",
+        "cloudflare": "https://www.cloudflarestatus.com/api/v2/summary.json",
+        "render": "https://status.render.com/api/v2/summary.json"
+    }
     
-    discord_data = None
-    github_data = None
+    results = {}
     
     try:
         async with aiohttp.ClientSession() as session:
-            # Discordのステータス取得
-            try:
-                async with session.get(discord_status_url, timeout=5) as resp:
-                    if resp.status == 200:
-                        discord_data = await resp.json(content_type=None)
-            except Exception:
-                pass
-                
-            # GitHubのステータス取得
-            try:
-                async with session.get(github_status_url, timeout=5) as resp:
-                    if resp.status == 200:
-                        github_data = await resp.json(content_type=None)
-            except Exception:
-                pass
+            for key, url in urls.items():
+                try:
+                    async with session.get(url, timeout=5) as resp:
+                        if resp.status == 200:
+                            results[key] = await resp.json(content_type=None)
+                        else:
+                            results[key] = None
+                except Exception:
+                    results[key] = None
     except Exception as e:
         await interaction.followup.send(f"⚠️ 通信セッションの確立に失敗しました: {e}")
         return
@@ -366,60 +363,42 @@ async def check_status(interaction: discord.Interaction):
     try:
         embed = discord.Embed(title="🛠️ 各種サービス障害・稼働状況", color=discord.Color.dark_embed())
         
-        # --- Discordの判定 ---
-        if discord_data:
-            status_indicator = discord_data.get("status", {}).get("indicator", "none")
-            status_description = discord_data.get("status", {}).get("description", "不明")
+        # 共通のステータス解析ヘルパー関数
+        def parse_status(data, name):
+            if not data:
+                return f"⚠️ ステータス情報の取得に失敗しました。"
             
-            if status_indicator == "none":
-                dc_text = f"🟢 **正常稼働中**\n説明: {status_description}"
-            elif status_indicator == "minor":
-                dc_text = f"🟡 **軽微な障害発生中**\n説明: {status_description}"
-            elif status_indicator == "major":
-                dc_text = f"🟠 **重大な障害発生中**\n説明: {status_description}"
+            status_info = data.get("status", {})
+            indicator = status_info.get("indicator", "none")
+            description = status_info.get("description", "不明")
+            
+            if indicator == "none":
+                text = f"🟢 **正常稼働中**\n説明: {description}"
+            elif indicator == "minor":
+                text = f"🟡 **軽微な障害発生中**\n説明: {description}"
+            elif indicator == "major":
+                text = f"🟠 **重大な障害発生中**\n説明: {description}"
             else:
-                dc_text = f"🔴 **大規模な障害発生中**\n説明: {status_description}"
+                text = f"🔴 **大規模な障害発生中**\n説明: {description}"
                 
-            incidents = discord_data.get("incidents", [])
+            incidents = data.get("incidents", [])
             if incidents:
                 active_incidents = [inc["name"] for inc in incidents if inc.get("status") != "resolved"]
                 if active_incidents:
-                    dc_text += f"\n**アクティブなインシデント:**\n" + "\n".join([f"- {name}" for name in active_incidents])
-        else:
-            dc_text = "⚠️ ステータス情報の取得に失敗しました。"
-            
-        embed.add_field(name="💬 Discord ステータス", value=dc_text, inline=False)
+                    text += f"\n**アクティブなインシデント:**\n" + "\n".join([f"- {inc_name}" for inc_name in active_incidents])
+            return text
+
+        # 各サービスのフィールドを追加
+        embed.add_field(name="💬 Discord ステータス", value=parse_status(results.get("discord"), "Discord"), inline=False)
+        embed.add_field(name="🐙 GitHub ステータス", value=parse_status(results.get("github"), "GitHub"), inline=False)
+        embed.add_field(name="☁️ Cloudflare ステータス", value=parse_status(results.get("cloudflare"), "Cloudflare"), inline=False)
+        embed.add_field(name="🚀 Render ステータス", value=parse_status(results.get("render"), "Render"), inline=False)
         
-        # --- GitHubの判定 ---
-        if github_data:
-            gh_indicator = github_data.get("status", {}).get("indicator", "none")
-            gh_description = github_data.get("status", {}).get("description", "不明")
-            
-            if gh_indicator == "none":
-                gh_text = f"🟢 **正常稼働中**\n説明: {gh_description}"
-            elif gh_indicator == "minor":
-                gh_text = f"🟡 **軽微な障害発生中**\n説明: {gh_description}"
-            elif gh_indicator == "major":
-                gh_text = f"🟠 **重大な障害発生中**\n説明: {gh_description}"
-            else:
-                gh_text = f"🔴 **大規模な障害発生中**\n説明: {gh_description}"
-                
-            gh_incidents = github_data.get("incidents", [])
-            if gh_incidents:
-                active_gh_incidents = [inc["name"] for inc in gh_incidents if inc.get("status") != "resolved"]
-                if active_gh_incidents:
-                    gh_text += f"\n**アクティブなインシデント:**\n" + "\n".join([f"- {name}" for name in active_gh_incidents])
-        else:
-            gh_text = "⚠️ ステータス情報の取得に失敗しました。"
-            
-        embed.add_field(name="🐙 GitHub ステータス", value=gh_text, inline=False)
-        
-        embed.set_footer(text="情報元: Atlassian Statuspage API (Discord / GitHub Official)")
+        embed.set_footer(text="情報元: Atlassian Statuspage API (各公式ステータス)")
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
         await interaction.followup.send(f"⚠️ 障害情報の構築中にエラーが発生しました: {e}")
-
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
