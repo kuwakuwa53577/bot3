@@ -331,6 +331,90 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
+# --- 10. Discord & GitHub 障害状況確認コマンド ---
+@bot.tree.command(name="status", description="DiscordとGitHubの現在の障害状況や稼働ステータスを確認します")
+async def check_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    
+    discord_status_url = "https://discordstatus.com/api/v2/summary.json"
+    github_status_url = "https://www.githubstatus.com/api/v2/summary.json"
+    
+    discord_data = None
+    github_data = None
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Discordのステータス取得
+            try:
+                async with session.get(discord_status_url, timeout=5) as resp:
+                    if resp.status == 200:
+                        discord_data = await resp.json(content_type=None)
+            except Exception:
+                pass
+                
+            # GitHubのステータス取得
+            try:
+                async with session.get(github_status_url, timeout=5) as resp:
+                    if resp.status == 200:
+                        github_data = await resp.json(content_type=None)
+        
+        embed = discord.Embed(title="🛠️ 各種サービス障害・稼働状況", color=discord.Color.dark_embed())
+        
+        # --- Discordの判定 ---
+        if discord_data:
+            status_indicator = discord_data.get("status", {}).get("indicator", "none")
+            status_description = discord_data.get("status", {}).get("description", "不明")
+            
+            if status_indicator == "none":
+                dc_text = f"🟢 **正常稼働中**\n説明: {status_description}"
+            elif status_indicator == "minor":
+                dc_text = f"🟡 **軽微な障害発生中**\n説明: {status_description}"
+            elif status_indicator == "major":
+                dc_text = f"🟠 **重大な障害発生中**\n説明: {status_description}"
+            else:
+                dc_text = f"🔴 **大規模な障害発生中**\n説明: {status_description}"
+                
+            # 発生中のインシデントがあれば追加
+            incidents = discord_data.get("incidents", [])
+            if incidents:
+                active_incidents = [inc["name"] for inc in incidents if inc.get("status") != "resolved"]
+                if active_incidents:
+                    dc_text += f"\n**アクティブなインシデント:**\n" + "\n".join([f"- {name}" for name in active_incidents])
+        else:
+            dc_text = "⚠️ ステータス情報の取得に失敗しました。"
+            
+        embed.add_field(name="💬 Discord ステータス", value=dc_text, inline=False)
+        
+        # --- GitHubの判定 ---
+        if github_data:
+            gh_indicator = github_data.get("status", {}).get("indicator", "none")
+            gh_description = github_data.get("status", {}).get("description", "不明")
+            
+            if gh_indicator == "none":
+                gh_text = f"🟢 **正常稼働中**\n説明: {gh_description}"
+            elif gh_indicator == "minor":
+                gh_text = f"🟡 **軽微な障害発生中**\n説明: {gh_description}"
+            elif gh_indicator == "major":
+                gh_text = f"🟠 **重大な障害発生中**\n説明: {gh_description}"
+            else:
+                gh_text = f"🔴 **大規模な障害発生中**\n説明: {gh_description}"
+                
+            gh_incidents = github_data.get("incidents", [])
+            if gh_incidents:
+                active_gh_incidents = [inc["name"] for inc in gh_incidents if inc.get("status") != "resolved"]
+                if active_gh_incidents:
+                    gh_text += f"\n**アクティブなインシデント:**\n" + "\n".join([f"- {name}" for name in active_gh_incidents])
+        else:
+            gh_text = "⚠️ ステータス情報の取得に失敗しました。"
+            
+        embed.add_field(name="🐙 GitHub ステータス", value=gh_text, inline=False)
+        
+        embed.set_footer(text="情報元: Atlassian Statuspage API (Discord / GitHub Official)")
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ 障害情報の取得中にエラーが発生しました: {e}")
+
 
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
