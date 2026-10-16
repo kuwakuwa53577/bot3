@@ -775,8 +775,8 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
     )
     embed.add_field(name="🌐 ネットワーク・ISP情報", value=net_text, inline=False)
 
-    if google_maps_url:
-        embed.add_field(name="🗺️ マップ確認", value=`[推定位置をGoogle Mapsで開く]({google_maps_url})`, inline=False)
+if google_maps_url:
+        embed.add_field(name="🗺️ マップ確認", value=f"[推定位置をGoogle Mapsで開く]({google_maps_url})", inline=False)
 
     # アカウント履歴
     embed.add_field(name="📅 Discordアカウント履歴", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
