@@ -23,6 +23,10 @@ intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True 
 
+# 自動で「いいね」を付けたいチャンネルのIDを設定してください
+# 環境変数から取得するか、直接チャンネルIDの数字を書き込んでください
+TARGET_REACTION_CHANNEL_ID = int(os.environ.get("TARGET_REACTION_CHANNEL_ID", "0"))
+
 class ReactionRolePersistentView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -41,6 +45,28 @@ async def on_ready():
         print(f"Successfully synced {len(synced)} command(s).")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+
+
+# --- 自動イイネ（リアクション）機能 ---
+@bot.event
+async def on_message(message: discord.Message):
+    # ボット自身のメッセージや、サーバー外（DMなど）は無視する
+    if message.author.bot or not message.guild:
+        return
+
+    # 指定されたチャンネルIDと一致する場合のみリアクションを付与
+    # TARGET_REACTION_CHANNEL_ID が 0 の場合は機能しません
+    if TARGET_REACTION_CHANNEL_ID != 0 and message.channel.id == TARGET_REACTION_CHANNEL_ID:
+        try:
+            # 「👍」の絵文字を自動で追加する
+            await message.add_reaction("👍")
+        except discord.Forbidden:
+            print("❌ リアクションを追加する権限がありません（「リアクションの追加」権限を確認してください）。")
+        except Exception as e:
+            print(f"⚠️ リアクション付与中にエラーが発生しました: {e}")
+
+    # これがないと他のコマンド（/ipや/zipなど）が反応しなくなるため必須です
+    await bot.process_commands(message)
 
 
 # --- 3. IPアドレス検索コマンド ---
@@ -234,7 +260,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 7. 複数ロール対応リアクションロール設置コマンド（重複チェック付き） ---
+# --- 7. 複数ロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
         super().__init__(style=discord.ButtonStyle.primary, label=label, emoji=emoji, custom_id=f"rr_{role_id}")
@@ -280,7 +306,6 @@ async def reactionrole_command(
         await interaction.response.send_message("❌ このコマンドを実行するには「ロールの管理」権限が必要です。", ephemeral=True)
         return
 
-    # 入力されたロールのリストを作成
     selected_roles = []
     roles_info = [(role1, label1, emoji1), (role2, label2, emoji2), (role3, label3, emoji3)]
 
@@ -290,7 +315,7 @@ async def reactionrole_command(
                 await interaction.response.send_message(f"❌ ロール「{role.name}」に対してボタンのテキスト（label）が指定されていません。", ephemeral=True)
                 return
             if role.id in selected_roles:
-                await interaction.response.send_message(f"❌ 同じロール（{role.name}）を複数選択することはできません。別のロールを指定してください。", ephemeral=True)
+                await interaction.response.send_message(f"❌ 同じロール（{role.name}）を複数選択することはできません。", ephemeral=True)
                 return
             if role.position >= interaction.guild.me.top_role.position:
                 await interaction.response.send_message(f"❌ ロール「{role.name}」は私のロールより権限が上のため付与できません。", ephemeral=True)
@@ -321,6 +346,6 @@ if __name__ == "__main__":
 
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
-        print("❌ エラー: DISCORD_TOKEN 環境変数が設定されていません。")
+        print("❌ エラー: DISCORD_TOKEN が設定されていません。")
     else:
         bot.run(token)
