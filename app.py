@@ -120,18 +120,20 @@ async def on_message(message: discord.Message):
 # 5. 便利ツール・解析コマンド群 (/ip, /zip, /domain, /dns, /check_url, /status, /lookup)
 # --------------------------------------------------
 
-# ① IPアドレス詳細完全解析コマンド
-@bot.tree.command(name="ip", description="指定されたIPアドレスから取得できるすべての情報を徹底的に解析します")
+# --- IPアドレス詳細完全解析コマンド（限界まで情報を網羅） ---
+@bot.tree.command(name="ip", description="指定されたIPアドレスから取得できるすべての情報を限界まで徹底的に解析します")
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
 async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
+    
+    # ip-api.com から全フィールドを最大限取得するビットマスク
     ip_url = f"http://ip-api.com/json/{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(ip_url, params=ip_params) as response:
+            async with session.get(ip_url, params=ip_params, timeout=5) as response:
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 外部データサーバーとの通信に失敗しました。")
                     return
@@ -141,34 +143,105 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message', '不明なエラー')}")
             return
 
+        # 1. 逆引き（PTRレコード）の取得
         try:
             hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
             hostname_str = hostname[0]
         except Exception:
             hostname_str = "逆引きできませんでした（PTRレコードなし）"
 
+        # 2. 郵便番号から詳細な住所を逆引き
         zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
         full_address = "不明または日本国外"
+        pref_code = data.get("prefcode", "不明")
         
         if zip_code and len(zip_code) == 7 and zip_code.isdigit():
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get("https://zipcloud.ibsnet.co.jp/api/search", params={"zipcode": zip_code}) as z_resp:
+                    async with session.get("https://zipcloud.ibsnet.co.jp/api/search", params={"zipcode": zip_code}, timeout=5) as z_resp:
                         if z_resp.status == 200:
                             z_data = await z_resp.json(content_type=None)
                             if z_data.get("status") == 200 and z_data.get("results"):
                                 res = z_data["results"][0]
                                 full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
+                                pref_code = res.get('prefcode', pref_code)
             except Exception:
                 pass
 
-        embed = discord.Embed(title=f"🌐 IPアドレス完全解析結果: {data.get('query', target_ip)}", color=discord.Color.blue())
-        embed.add_field(name="📍 地理・住所情報", value=f"**自動逆引き住所:** {full_address}\n**国名:** {data.get('country', '不明')}\n**都道府県:** {data.get('regionName', '不明')}\n**市区町村:** {data.get('city', '不明')}\n**郵便番号:** 〒{data.get('zip', '不明')}", inline=False)
-        embed.add_field(name="🏢 通信・ネットワーク情報", value=f"**ホスト名 (PTR):** `{hostname_str}`\n**プロバイダ (ISP):** {data.get('isp', '不明')}", inline=False)
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+        # 3. 緯度・経度からGoogle Mapsリンクの作成
+        lat = data.get("lat")
+        lon = data.get("lon")
+        google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}" if lat and lon else None
 
+        # 4. Embedの構築（限界まで情報を網羅）
+        embed = discord.Embed(
+            title=f"🌐 IPアドレス限界解析結果: `{data.get('query', target_ip)}`", 
+            color=discord.Color.dark_blue(),
+            description="IPジオロケーションAPI、DNS逆引き、および郵便番号DBから抽出した全データ"
+        )
+        
+        # フィールド1: 地理・住所情報
+        embed.add_field(
+            name="📍 地理・詳細住所情報", 
+            value=(
+                f"**逆引き住所:** {full_address}\n"
+                f"**国:** {data.get('country', '不明')} (`{data.get('countryCode', '-')}`)\n"
+                f"**都道府県:** {data.get('regionName', '不明')} (JIS: `{pref_code}`)\n"
+                f"**市区町村:** {data.get('city', '不明')}\n"
+                f"**地区 (District):** {data.get('district', 'なし')}\n"
+                f"**郵便番号:** 〒{data.get('zip', '不明')}"
+            ), 
+            inline=False
+        )
+        
+        # フィールド2: 座標・時差・文化
+        embed.add_field(
+            name="🧭 座標・タイムゾーン", 
+            value=(
+                f"**緯度 / 経度:** `{lat}`, `{lon}`\n"
+                f"**タイムゾーン:** {data.get('timezone', '不明')}\n"
+                f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間\n"
+                f"**使用通貨:** {data.get('currency', '不明')}"
+            ), 
+            inline=False
+        )
+        
+        # フィールド3: 通信会社・ネットワーク情報
+        embed.add_field(
+            name="🏢 ネットワーク・プロバイダ情報", 
+            value=(
+                f"**ホスト名 (PTR):** `{hostname_str}`\n"
+                f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
+                f"**組織 (Org):** {data.get('org', '不明')}\n"
+                f"**AS番号:** {data.get('as', '不明')}\n"
+                f"**AS組織名:** {data.get('asname', '不明')}"
+            ), 
+            inline=False
+        )
+        
+        # フィールド4: セキュリティ・回線フラグ
+        is_mobile = "🔴 モバイル回線 (4G/5G/LTE)" if data.get("mobile") else "🟢 固定回線 / ブロードバンド"
+        is_proxy = "⚠️ VPN・プロキシ・Tor検知" if data.get("proxy") else "🟢 通常接続"
+        is_hosting = "⚠️ データセンター / VPS" if data.get("hosting") else "🟢 一般回線"
+        
+        embed.add_field(
+            name="🚨 回線タイプ・脅威判定", 
+            value=(
+                f"**回線種類:** {is_mobile}\n"
+                f"**匿名化ツール:** {is_proxy}\n"
+                f"**ホスティング:** {is_hosting}"
+            ), 
+            inline=False
+        )
+
+        if google_maps_url:
+            embed.add_field(name="🗺️ マップ確認", value=f"[Google Mapsで周辺位置を開く]({google_maps_url})", inline=False)
+        
+        embed.set_footer(text=f"APIステータス: Success | 取得項目: 20+フルメトリクス解析")
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ 予期せぬエラーが発生しました: {e}")
 # ② 郵便番号検索コマンド
 @bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所情報を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
