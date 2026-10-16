@@ -8,6 +8,11 @@ from discord.ext import commands
 from discord import app_commands
 from flask import Flask
 import base64
+import json
+import re
+
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # --- 1. Flask（簡易Webサーバー）の設定 ---
 app = Flask(__name__)
@@ -26,6 +31,54 @@ intents.message_content = True
 intents.members = True 
 
 TARGET_REACTION_CHANNEL_ID = int(os.environ.get("TARGET_REACTION_CHANNEL_ID", "0"))
+TARGET_CREATE_VC_ID = int(os.environ.get("TARGET_CREATE_VC_ID", "0"))
+
+auth_env = os.environ.get("AUTHORIZED_USER_IDS", "")
+if auth_env:
+    AUTHORIZED_USER_IDS = {int(uid.strip()) for uid in auth_env.split(",") if uid.strip().isdigit()}
+else:
+    AUTHORIZED_USER_IDS = {123456789012345678}
+
+message_spam_track = {}
+
+# --- Firebase 初期化 ---
+firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
+if firebase_creds_json:
+    try:
+        cred_dict = json.loads(firebase_creds_json)
+        if "private_key" in cred_dict:
+            cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        print("✅ Firebase Admin SDK の初期化に成功しました")
+    except Exception as e:
+        print(f"❌ Firebase 初期化エラー: {e}")
+elif os.path.exists("serviceAccountKey.json"):
+    try:
+        cred = credentials.Certificate("serviceAccountKey.json")
+        firebase_admin.initialize_app(cred)
+        print("✅ ローカルファイルで Firebase の初期化に成功しました")
+    except Exception as e:
+        print(f"❌ Firebase 初期化エラー: {e}")
+
+try:
+    db = firestore.client()
+except Exception as e:
+    db = None
+    print(f"⚠️ Firestoreクライアントの取得に失敗しました: {e}")
+
+def get_user_ip_from_db(user_id: int) -> str:
+    if not db:
+        return "データベース未接続"
+    try:
+        doc_ref = db.collection("verifications").document(str(user_id))
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            return data.get("ip", "IP未記録")
+    except Exception as e:
+        print(f"❌ DB読み込みエラー: {e}")
+    return "IP取得失敗"
 
 class ReactionRolePersistentView(discord.ui.View):
     def __init__(self):
@@ -33,19 +86,27 @@ class ReactionRolePersistentView(discord.ui.View):
 
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        bot.add_view(ReactionRolePersistentView())
+        self.add_view(ReactionRolePersistentView())
+        try:
+            synced = await self.tree.sync()
+            print(f"Successfully synced {len(synced)} command(s).")
+        except Exception as e:
+            print(f"Failed to sync commands: {e}")
 
 bot = MyBot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Successfully synced {len(synced)} command(s).")
-    except Exception as e:
-        print(f"Failed to sync commands: {e}")
 
+def is_authorized_or_admin(member: discord.Member) -> bool:
+    if not member:
+        return False
+    if member.id in AUTHORIZED_USER_IDS:
+        return True
+    if member.guild_permissions.administrator:
+        return True
+    return False
 
 # --- 自動イイネ（リアクション）機能 ---
 @bot.event
@@ -73,7 +134,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
     
-    # ip-api.com から全フィールド（ビットマスク: 66846719）を取得
     ip_url = f"http://ip-api.com/json/{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
@@ -89,14 +149,12 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message', '不明なエラー')}")
             return
 
-        # 逆引き（PTRレコード）の取得
         try:
             hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
             hostname_str = hostname[0]
         except Exception:
             hostname_str = "逆引きできませんでした（PTRレコードなし）"
 
-        # 郵便番号から日本の詳細住所を逆引き
         zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
         full_address = "不明または日本国外"
         pref_code = data.get("prefcode", "不明")
@@ -116,14 +174,12 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             except Exception:
                 full_address = "住所逆引き中にエラーが発生しました"
 
-        # Embedの構築（すべての取得情報を網羅）
         embed = discord.Embed(
             title=f"🌐 IPアドレス完全解析結果: {data.get('query', target_ip)}", 
             color=discord.Color.blue(),
             description="IPジオロケーションAPIおよびDNS逆引きから抽出した全データ"
         )
         
-        # 1. 地理・住所情報
         embed.add_field(
             name="📍 地理・住所情報", 
             value=(
@@ -137,7 +193,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             inline=False
         )
         
-        # 2. 座標・タイムゾーン・文化
         embed.add_field(
             name="🧭 座標・時差・通貨", 
             value=(
@@ -149,7 +204,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             inline=False
         )
         
-        # 3. 通信会社・ネットワーク情報
         embed.add_field(
             name="🏢 通信・ネットワーク情報", 
             value=(
@@ -162,7 +216,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             inline=False
         )
         
-        # 4. 回線種類・セキュリティ判定フラグ
         is_mobile = "🔴 モバイル回線 (4G/5G/LTE)" if data.get("mobile") else "🟢 固定回線 / ブロードバンド"
         is_proxy = "⚠️ VPN・プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
         is_hosting = "⚠️ データセンター（サーバー・VPS）" if data.get("hosting") else "🟢 通常の一般回線"
@@ -233,7 +286,6 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-
 # --- 5. ドメイン検索コマンド ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
@@ -291,7 +343,6 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-
 # --- 6. DNSレコード検索コマンド ---
 @bot.tree.command(name="dns", description="指定されたドメインのIPアドレスやDNS情報を解決します")
 @app_commands.describe(domain_name="検索したいドメイン名（例: example.com）")
@@ -327,7 +378,6 @@ async def lookup_dns(interaction: discord.Interaction, domain_name: str):
         await interaction.followup.send(f"⚠️ 指定されたドメイン `{target}` のIPアドレスを解決できませんでした。")
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
-
 
 # --- 7. URL安全チェックコマンド ---
 @bot.tree.command(name="check_url", description="URLの安全性をスキャンします")
@@ -405,7 +455,6 @@ async def check_status(interaction: discord.Interaction):
     try:
         embed = discord.Embed(title="🛠️ 各種サービス障害・稼働状況", color=discord.Color.dark_embed())
         
-        # 共通のステータス解析ヘルパー関数
         def parse_status(data, name):
             if not data:
                 return f"⚠️ ステータス情報の取得に失敗しました。"
@@ -430,7 +479,6 @@ async def check_status(interaction: discord.Interaction):
                     text += f"\n**アクティブなインシデント:**\n" + "\n".join([f"- {inc_name}" for inc_name in active_incidents])
             return text
 
-        # 各サービスのフィールドを追加
         embed.add_field(name="💬 Discord ステータス", value=parse_status(results.get("discord"), "Discord"), inline=False)
         embed.add_field(name="🐙 GitHub ステータス", value=parse_status(results.get("github"), "GitHub"), inline=False)
         embed.add_field(name="☁️ Cloudflare ステータス", value=parse_status(results.get("cloudflare"), "Cloudflare"), inline=False)
@@ -443,45 +491,32 @@ async def check_status(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ 障害情報の構築中にエラーが発生しました: {e}")
 
 # --- 11. テンポラリーボイスチャンネル機能の設定 ---
-# ※あらかじめDiscord上で「部屋作成用」のボイスチャンネルを作成し、そのIDを環境変数または変数に設定してください
-TARGET_CREATE_VC_ID = int(os.environ.get("TARGET_CREATE_VC_ID", "0"))
-
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if TARGET_CREATE_VC_ID == 0:
         return
 
-    # 1. ユーザーが「作成用チャンネル」に参加したとき
     if after.channel and after.channel.id == TARGET_CREATE_VC_ID:
         guild = member.guild
-        category = after.channel.category  # 同じカテゴリ内に作成する
-        
-        # チャンネル名を設定
+        category = after.channel.category
         channel_name = f"💬│{member.display_name}の部屋"
-        
-        # 権限を設定（本人と管理者だけが入れるようにする）
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(connect=False),
             member: discord.PermissionOverwrite(connect=True, manage_channels=True, mute_members=True)
         }
-        
         try:
-            # 新しいボイスチャンネルを作成
             new_channel = await guild.create_voice_channel(
                 name=channel_name,
                 category=category,
                 overwrites=overwrites,
-                user_limit=5  # 必要に応じて人数制限（例: 5人まで）
+                user_limit=5
             )
-            # ユーザーを新しいチャンネルに移動
             await member.move_to(new_channel)
         except Exception as e:
             print(f"⚠️ 一時ボイスチャンネル作成エラー: {e}")
 
-    # 2. ユーザーがボイスチャンネルから退出したとき（空になったカスタム部屋を削除）
     if before.channel and before.channel.id != TARGET_CREATE_VC_ID:
-        # 作成用チャンネルと同じカテゴリ、かつ名前が特定の形式で、誰もいなくなったら削除
-        if before.channel.category and before.channel.category == after.channel.category if after and after.channel else True:
+        if before.channel.category and before.channel.category == (after.channel.category if after and after.channel else True):
             if "の部屋" in before.channel.name and len(before.channel.members) == 0:
                 try:
                     await before.channel.delete()
@@ -496,22 +531,11 @@ async def create_private_room(interaction: discord.Interaction, target_user: dis
     await interaction.response.defer(thinking=True, ephemeral=True)
     guild = interaction.guild
     
-    if not guild:
-        await interaction.followup.send("❌ このコマンドはサーバー内で実行してください。")
-        return
-        
-    if target_user.bot:
-        await interaction.followup.send("❌ ボットを指定することはできません。")
-        return
-        
-    if target_user.id == interaction.user.id:
-        await interaction.followup.send("❌ 自分自身を指定することはできません。")
+    if not guild or target_user.bot or target_user.id == interaction.user.id:
+        await interaction.followup.send("❌ 無効なユーザー指定です。", ephemeral=True)
         return
 
-    # チャンネル名
     channel_name = f"🔒│{interaction.user.name}-{target_user.name}"
-    
-    # 権限設定（サーバーの一般メンバーには非表示、実行者と指定された相手、および管理者だけが見られる）
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
         interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
@@ -520,7 +544,6 @@ async def create_private_room(interaction: discord.Interaction, target_user: dis
     }
     
     try:
-        # チャンネルを作成（現在のチャンネルと同じカテゴリに配置）
         category = interaction.channel.category if hasattr(interaction.channel, 'category') else None
         private_channel = await guild.create_text_channel(
             name=channel_name,
@@ -529,23 +552,18 @@ async def create_private_room(interaction: discord.Interaction, target_user: dis
             topic=f"{interaction.user.mention} と {target_user.mention} のプライベートチャンネル"
         )
         
-        # 作成したチャンネルに案内を送信
         await private_channel.send(
             f"🔐 **プライベートチャンネルを作成しました！**\n"
             f"{interaction.user.mention} さんと {target_user.mention} さんだけが閲覧・書き込みできます。"
         )
         
         await interaction.followup.send(f"✅ プライベートチャンネルを作成しました: {private_channel.mention}")
-    except discord.Forbidden:
-        await interaction.followup.send("❌ ボットに「チャンネルの管理」権限がありません。")
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-import re
 
-# IPアドレス判定用ヘルパー関数
+# --- IPアドレス判定用ヘルパー関数 ---
 def is_valid_ip(address: str) -> bool:
-    # IPv4 / IPv6 の簡単なフォーマットチェック
     ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
     ipv6_pattern = r'^[0-9a-fA-F:]+$'
     return bool(re.match(ipv4_pattern, address) or (':' in address and re.match(ipv6_pattern, address)))
@@ -558,7 +576,6 @@ def is_valid_ip(address: str) -> bool:
 async def lookup_all(interaction: discord.Interaction, target: str):
     await interaction.response.defer(thinking=True)
     
-    # 整形（http, https, パス等の除去）
     clean_target = target.strip().replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
     
     target_ip = None
@@ -569,7 +586,6 @@ async def lookup_all(interaction: discord.Interaction, target: str):
     else:
         target_domain = clean_target
 
-    # 1. DNS解決 (A / AAAA レコード)
     ipv4_list = set()
     ipv6_list = set()
     ptr_hostname = "逆引きなし"
@@ -583,18 +599,15 @@ async def lookup_all(interaction: discord.Interaction, target: str):
             elif family == socket.AF_INET6:
                 ipv6_list.add(sockaddr[0])
                 
-        # IPが直接入力されていない場合は、解決された最初のIPv4をIP調査対象にする
         if not target_ip and ipv4_list:
             target_ip = list(ipv4_list)[0]
     except Exception:
         pass
 
-    # Reverse DNS (PTR) の取得
     if target_ip:
         try:
             hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
             ptr_hostname = hostname[0]
-            # ドメイン未入力でPTRからドメインが取れた場合
             if not target_domain and "." in ptr_hostname:
                 parts = ptr_hostname.split(".")
                 if len(parts) >= 2:
@@ -602,7 +615,6 @@ async def lookup_all(interaction: discord.Interaction, target: str):
         except Exception:
             ptr_hostname = "PTRレコードなし"
 
-    # 2. IPジオロケーション＆ネットワーク情報の取得
     ip_data = {}
     full_address = "不明または日本国外"
     if target_ip:
@@ -614,7 +626,6 @@ async def lookup_all(interaction: discord.Interaction, target: str):
                     if resp.status == 200:
                         ip_data = await resp.json(content_type=None)
                         
-            # 郵便番号から詳細住所の逆引き
             zip_code = ip_data.get("zip", "").strip().replace("-", "").replace(" ", "")
             if zip_code and len(zip_code) == 7 and zip_code.isdigit():
                 zip_url = "https://zipcloud.ibsnet.co.jp/api/search"
@@ -628,7 +639,6 @@ async def lookup_all(interaction: discord.Interaction, target: str):
         except Exception:
             pass
 
-    # 3. ドメイン (RDAP/WHOIS) 情報の取得
     domain_data = {}
     created_date = updated_date = expires_date = "不明"
     if target_domain:
@@ -646,14 +656,12 @@ async def lookup_all(interaction: discord.Interaction, target: str):
         except Exception:
             pass
 
-    # Embed構築
     embed = discord.Embed(
         title=f"🔍 ネットワーク一括解析結果: {clean_target}",
         color=discord.Color.dark_purple(),
         description=f"対象: `{clean_target}`（IP解析 + DNS解決 + RDAPドメイン情報）"
     )
 
-    # フィールド1: DNS & 接続解決
     dns_text = (
         f"**解析可能IP (v4):** {', '.join(ipv4_list) if ipv4_list else 'なし / 解決不能'}\n"
         f"**解析可能IP (v6):** {', '.join(ipv6_list) if ipv6_list else 'なし'}\n"
@@ -661,7 +669,6 @@ async def lookup_all(interaction: discord.Interaction, target: str):
     )
     embed.add_field(name="🌐 DNS・IP解決情報", value=dns_text, inline=False)
 
-    # フィールド2: 地理・回線情報（IPが存在する場合）
     if ip_data and ip_data.get("status") == "success":
         is_mobile = "🔴 モバイル (4G/5G)" if ip_data.get("mobile") else "🟢 固定回線"
         is_proxy = "⚠️ VPN/プロキシ" if ip_data.get("proxy") else "🟢 通常接続"
@@ -678,7 +685,6 @@ async def lookup_all(interaction: discord.Interaction, target: str):
         )
         embed.add_field(name="📍 IPジオロケーション & ネットワーク", value=geo_text, inline=False)
 
-    # フィールド3: ドメイン情報（ドメインが存在する場合）
     if target_domain:
         domain_text = (
             f"**対象ドメイン:** `{target_domain}`\n"
@@ -691,106 +697,95 @@ async def lookup_all(interaction: discord.Interaction, target: str):
     embed.set_footer(text="マルチデータソース: ip-api, zipcloud, RDAP, Local DNS")
     await interaction.followup.send(embed=embed)
 
+
 # --- 16. 管理者専用 Firebase連動 ユーザー位置情報（住所）特定コマンド ---
 @bot.tree.command(name="userinfo", description="【管理者専用】Firebaseの登録IPから対象メンバーの大まかなエリアや住所情報を特定します")
-@app_commands.checks.has_permissions(administrator=True) # 管理者権限が必要
+@app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(member="調査したいDiscordメンバーを選択してください")
 async def user_info_command(interaction: discord.Interaction, member: discord.Member):
-    await interaction.response.defer(thinking=True, ephemeral=True) # 管理者にだけプライベート表示
+    await interaction.response.defer(thinking=True, ephemeral=True)
     
-    guild = interaction.guild
-    if not guild:
-        await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
-        return
+    try:
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
+            return
 
-    # 1. 既存の関数を使ってFirebaseからIPアドレスを取得
-    user_ip = get_user_ip_from_db(member.id)
-    
-    ip_location = "不明または未検証"
-    detailed_address = "特定不可（IPデータなし）"
-    isp_info = "不明"
-    google_maps_url = None
-
-    # 2. 取得したIPが有効なIPアドレスの場合、APIで住所・エリア情報を逆引き解析
-    if user_ip and user_ip not in ["データベース未接続", "IP未記録", "IP取得失敗"]:
-        ip_url = f"http://ip-api.com/json/{user_ip}"
-        ip_params = {"lang": "ja", "fields": "66846719"}
+        user_ip = get_user_ip_from_db(member.id)
         
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(ip_url, params=ip_params, timeout=5) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        if data.get("status") == "success":
-                            country = data.get("country", "")
-                            region = data.get("regionName", "")
-                            city = data.get("city", "")
-                            district = data.get("district", "")
-                            ip_location = f"{country} {region} {city} {district}".strip()
-                            isp_info = f"{data.get('isp', '不明')} ({data.get('org', '')})"
-                            
-                            # 郵便番号が取得できた場合は zipcloud で町域レベルまでさらに詳細特定
-                            zip_code = data.get("zip", "").strip()
-                            if zip_code and len(zip_code) == 7 and zip_code.isdigit():
-                                async with session.get("https://zipcloud.ibsnet.co.jp/api/search", params={"zipcode": zip_code}, timeout=5) as z_resp:
-                                    if z_resp.status == 200:
-                                        z_data = await z_resp.json(content_type=None)
-                                        if z_data.get("status") == 200 and z_data.get("results"):
-                                            res = z_data["results"][0]
-                                            detailed_address = f"〒{zip_code[:3]}-{zip_code[3:]} ➔ **{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}**"
-                            
-                            # 緯度・経度からGoogle Mapsリンクを作成
-                            lat = data.get("lat")
-                            lon = data.get("lon")
-                            if lat and lon:
-                                google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-        except Exception as e:
-            ip_location = f"位置情報解析エラー: {e}"
+        ip_location = "不明または未検証"
+        detailed_address = "特定不可（IPデータなし）"
+        isp_info = "不明"
+        google_maps_url = None
 
-    # 3. Discord側の基本プロフィール情報の整理
-    roles = [role.mention for role in member.roles if role != guild.default_role]
-    roles_str = ", ".join(roles) if roles else "ロールなし"
-    created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
-    joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
-    is_bot = "🤖 ボット (Bot)" if member.bot else "👤 一般ユーザー"
+        if user_ip and user_ip not in ["データベース未接続", "IP未記録", "IP取得失敗"]:
+            ip_url = f"http://ip-api.com/json/{user_ip}"
+            ip_params = {"lang": "ja", "fields": "66846719"}
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(ip_url, params=ip_params, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            if data.get("status") == "success":
+                                country = data.get("country", "")
+                                region = data.get("regionName", "")
+                                city = data.get("city", "")
+                                district = data.get("district", "")
+                                ip_location = f"{country} {region} {city} {district}".strip()
+                                isp_info = f"{data.get('isp', '不明')} ({data.get('org', '')})"
+                                
+                                zip_code = data.get("zip", "").strip()
+                                if zip_code and len(zip_code) == 7 and zip_code.isdigit():
+                                    async with session.get("https://zipcloud.ibsnet.co.jp/api/search", params={"zipcode": zip_code}, timeout=5) as z_resp:
+                                        if z_resp.status == 200:
+                                            z_data = await z_resp.json(content_type=None)
+                                            if z_data.get("status") == 200 and z_data.get("results"):
+                                                res = z_data["results"][0]
+                                                detailed_address = f"〒{zip_code[:3]}-{zip_code[3:]} ➔ **{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}**"
+                                
+                                lat = data.get("lat")
+                                lon = data.get("lon")
+                                if lat and lon:
+                                    google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+            except Exception:
+                pass
 
-    # 4. Embedの構築
-    embed = discord.Embed(
-        title=f"🔍 メンバー位置情報特定: {member.display_name}",
-        color=discord.Color.red(),
-        description=f"対象ユーザー: {member.mention} (`{member.id}`)\n※Firebaseの認証データ（`verifications`）からIPを抽出し特定しています。"
-    )
-    
-    if member.avatar:
-        embed.set_thumbnail(url=member.avatar.url)
+        roles = [role.mention for role in member.roles if role != guild.default_role]
+        roles_str = ", ".join(roles) if roles else "ロールなし"
+        created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
+        joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
 
-    # 住所・位置情報フィールド
-    embed.add_field(name="📍 データベースIPに基づく特定住所", value=f"### `{detailed_address if detailed_address != '特定不可（IPデータなし）' else ip_location}`", inline=False)
-    
-    # ネットワーク詳細
-    net_text = (
-        f"**記録されたIP:** `{user_ip}`\n"
-        f"**推定エリア:** {ip_location}\n"
-        f"**プロバイダ (ISP):** {isp_info}"
-    )
-    embed.add_field(name="🌐 ネットワーク・ISP情報", value=net_text, inline=False)
+        embed = discord.Embed(
+            title=f"🔍 メンバー位置情報特定: {member.display_name}",
+            color=discord.Color.red(),
+            description=f"対象ユーザー: {member.mention} (`{member.id}`)\n※Firebaseのデータベース（`verifications`）からIPを抽出して特定しています。"
+        )
+        
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
 
-if google_maps_url:
-        embed.add_field(name="🗺️ マップ確認", value=f"[推定位置をGoogle Mapsで開く]({google_maps_url})", inline=False)
+        embed.add_field(name="📍 データベースIPに基づく特定住所", value=f"### `{detailed_address if detailed_address != '特定不可（IPデータなし）' else ip_location}`", inline=False)
+        embed.add_field(name="🌐 ネットワーク・ISP情報", value=f"**記録されたIP:** `{user_ip}`\n**推定エリア:** {ip_location}\n**プロバイダ (ISP):** {isp_info}", inline=False)
 
-    # アカウント履歴
-    embed.add_field(name="📅 Discordアカウント履歴", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
-    embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
+        if google_maps_url:
+            embed.add_field(name="🗺️ マップ確認", value=f"[推定位置をGoogle Mapsで開く]({google_maps_url})", inline=False)
 
-    embed.set_footer(text=f"管理者専用機能 | 実行者: {interaction.user.name}")
-    await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.add_field(name="📅 Discordアカウント履歴", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
+        embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
 
-# エラーハンドリング
+        embed.set_footer(text=f"管理者専用機能 | 実行者: {interaction.user.name}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: `{e}`", ephemeral=True)
+
 @user_info_command.error
 async def user_info_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ このコマンドはサーバーの管理者のみが使用できます。", ephemeral=True)
-        
+
+
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
@@ -816,21 +811,18 @@ class MultiReactionRoleButton(discord.ui.Button):
             else:
                 await member.add_roles(role)
                 await interaction.response.send_message(f"🎉 ロール **{role.name}** を付与しました！", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ ボットの権限（ロールの管理）が不足しています。", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"⚠️ エラーが発生しました: {e}", ephemeral=True)
 
 @bot.tree.command(name="reactionrole", description="最大6つのロールを同時に付与できるボタンパネルを設置します")
 @app_commands.describe(
-    title="パネルのタイトル（省略時はデフォルト）",
-    description="パネルの説明文（省略時はデフォルト）",
-    role1="1つ目のロール", label1="1つ目のボタン名", emoji1="1つ目の絵文字（任意）",
-    role2="2つ目のロール（任意）", label2="2つ目のボタン名（任意）", emoji2="2つ目の絵文字（任意）",
-    role3="3つ目のロール（任意）", label3="3つ目のボタン名（任意）", emoji3="3つ目の絵文字（任意）",
-    role4="4つ目のロール（任意）", label4="4つ目のボタン名（任意）", emoji4="4つ目の絵文字（任意）",
-    role5="5つ目のロール（任意）", label5="5つ目のボタン名（任意）", emoji5="5つ目の絵文字（任意）",
-    role6="6つ目のロール（任意）", label6="6つ目のボタン名（任意）", emoji6="6つ目の絵文字（任意）"
+    title="パネルのタイトル", description="パネルの説明文",
+    role1="1つ目のロール", label1="1つ目のボタン名", emoji1="1つ目の絵文字",
+    role2="2つ目のロール", label2="2つ目のボタン名", emoji2="2つ目の絵文字",
+    role3="3つ目のロール", label3="3つ目のボタン名", emoji3="3つ目の絵文字",
+    role4="4つ目のロール", label4="4つ目のボタン名", emoji4="4つ目の絵文字",
+    role5="5つ目のロール", label5="5つ目のボタン名", emoji5="5つ目の絵文字",
+    role6="6つ目のロール", label6="6つ目のボタン名", emoji6="6つ目の絵文字"
 )
 async def reactionrole_command(
     interaction: discord.Interaction, 
@@ -852,40 +844,23 @@ async def reactionrole_command(
         (role4, label4, emoji4), (role5, label5, emoji5), (role6, label6, emoji6)
     ]
     
-    selected_roles = []
-    active_roles_count = 0
-
+    view = discord.ui.View(timeout=None)
+    active_count = 0
     for role, label, emoji in roles_info:
         if role is not None:
-            active_roles_count += 1
             if label is None:
-                await interaction.response.send_message(f"❌ ロール「{role.name}」に対してボタンのテキスト（label）が指定されていません。", ephemeral=True)
+                await interaction.response.send_message(f"❌ ロール「{role.name}」に対してボタンのテキストが指定されていません。", ephemeral=True)
                 return
-            if role.id in selected_roles:
-                await interaction.response.send_message(f"❌ 同じロール（{role.name}）を複数選択することはできません。", ephemeral=True)
-                return
-            if role.position >= interaction.guild.me.top_role.position:
-                await interaction.response.send_message(f"❌ ロール「{role.name}」は私のロールより権限が上のため付与できません。", ephemeral=True)
-                return
-            selected_roles.append(role.id)
+            view.add_item(MultiReactionRoleButton(role_id=role.id, label=label, emoji=emoji))
+            active_count += 1
 
-    if active_roles_count == 0:
+    if active_count == 0:
         await interaction.response.send_message("❌ 最低1つのロールを指定してください。", ephemeral=True)
         return
 
-    view = discord.ui.View(timeout=None)
-    for role, label, emoji in roles_info:
-        if role is not None:
-            view.add_item(MultiReactionRoleButton(role_id=role.id, label=label, emoji=emoji))
-
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=discord.Color.blue()
-    )
-
+    embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
     await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ 最大6個のボタンを持つマルチロールパネルを設置しました！", ephemeral=True)
+    await interaction.response.send_message("✅ ロールパネルを設置しました！", ephemeral=True)
 
 
 # --- 9. 起動処理 ---
@@ -894,8 +869,8 @@ if __name__ == "__main__":
     web_thread.daemon = True
     web_thread.start()
 
-    token = os.environ.get("DISCORD_TOKEN")
+    token = os.environ.get("DISCORD_TOKEN") or os.environ.get("BOT_TOKEN")
     if not token:
-        print("❌ エລະ: DISCORD_TOKEN が設定されていません。")
+        print("❌ エラー: DISCORD_TOKEN が設定されていません。")
     else:
         bot.run(token)
