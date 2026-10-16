@@ -691,8 +691,8 @@ async def lookup_all(interaction: discord.Interaction, target: str):
     embed.set_footer(text="マルチデータソース: ip-api, zipcloud, RDAP, Local DNS")
     await interaction.followup.send(embed=embed)
 
-# --- 15. 管理者専用 メンバー特定・調査コマンド ---
-@bot.tree.command(name="userinfo", description="【管理者専用】サーバー内の特定メンバーの詳細情報やアカウント履歴を調査します")
+# --- 15. 管理者専用 メンバー特定・調査コマンド（住所・地域情報拡張版） ---
+@bot.tree.command(name="userinfo", description="【管理者専用】特定メンバーの詳細情報やアカウント履歴、プロフィール上の地域を調査します")
 @app_commands.checks.has_permissions(administrator=True) # 管理者権限が必要
 @app_commands.describe(member="調査したいDiscordメンバーを選択してください")
 async def user_info_command(interaction: discord.Interaction, member: discord.Member):
@@ -711,7 +711,7 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
 
     # アカウント作成日とサーバー参加日を日本語のフォーマットに変換
     created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
-    joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
+    joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_text else "不明"
 
     # バッジやボット判定
     is_bot = "🤖 ボット (Bot)" if member.bot else "👤 一般ユーザー"
@@ -724,31 +724,38 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
         discord.Status.offline: "⚫ オフライン / 非表示"
     }.get(member.status, "⚪ 不明")
 
-    # アクティビティ（プレイ中のゲームなど）
+    # アクティビティやカスタムステータスから地域・住所の手がかりを探す
+    detected_location = "プロフィールから検出されませんでした"
     activities = []
+    
     for activity in member.activities:
         if isinstance(activity, discord.Game):
             activities.append(f"🎮 プレイ中: {activity.name}")
         elif isinstance(activity, discord.Streaming):
             activities.append(f"📺 配信中: [{activity.name}]({activity.url})")
         elif isinstance(activity, discord.Spotify):
-            activities.append(f"🎵 Spotifyで聴いている: {activity.title} by {activity.artist}")
+            activities.append(f"🎵 Spotify: {activity.title} by {activity.artist}")
         elif isinstance(activity, discord.CustomActivity):
             if activity.name:
                 activities.append(f"💬 ステータス: {activity.name}")
+                # カスタムステータスの中に「都」「府」「県」「市」などの住所らしいキーワードがあれば候補として拾う
+                if any(keyword in activity.name for keyword in ["都", "道", "府", "県", "市", "区", "町", "村"]):
+                    detected_location = f"ステータスより推測: `{activity.name}`"
+
     activity_str = "\n".join(activities) if activities else "アクティビティなし"
 
     # Embedの構築
     embed = discord.Embed(
         title=f"🔍 メンバー調査結果: {member.display_name}",
         color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
-        description=f"対象ユーザー: {member.mention} (`{member.id}`)"
+        description=f"対象ユーザー: {member.mention} (`{member.id}`)\n※Discordの仕様上、IPや実住所を直接取得することはできません。以下は公開情報およびステータスからの推定です。"
     )
     
     if member.avatar:
         embed.set_thumbnail(url=member.avatar.url)
 
     embed.add_field(name="📌 基本属性", value=f"**アカウント種別:** {is_bot}\n**現在のステータス:** {status_emoji}", inline=False)
+    embed.add_field(name="📍 地域・住所の手がかり", value=f"### `{detected_location}`", inline=False)
     embed.add_field(name="📅 日時情報", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
     embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
     embed.add_field(name="🎮 アクティビティ", value=activity_str, inline=False)
