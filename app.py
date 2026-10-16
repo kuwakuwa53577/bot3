@@ -21,17 +21,14 @@ def run_web():
 # --- 2. Discord Botの設定 ---
 intents = discord.Intents.default()
 intents.message_content = True 
-intents.members = True # メンバー情報を取得するため必要です
+intents.members = True 
 
-# --- 永続ビューの安全な再登録用クラス（複数のロールボタンに対応） ---
 class ReactionRolePersistentView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-# 起動時のボットクラス
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        # 永続ビューを登録
         bot.add_view(ReactionRolePersistentView())
 
 bot = MyBot(command_prefix="!", intents=intents)
@@ -46,7 +43,7 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 
-# --- 3. IPアドレス検索コマンド（zipcloudのcontent_type対策済み） ---
+# --- 3. IPアドレス検索コマンド ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -96,30 +93,12 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             f"**郵便番号:** 〒{data.get('zip', '不明')}\n"
             f"**タイムゾーン:** {data.get('timezone', '不明')}"
         ), inline=False)
-
-        embed.add_field(name="🧭 座標・時差・通貨", value=(
-            f"**緯度/経度:** {data.get('lat', '-')}, {data.get('lon', '-')}\n"
-            f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間\n"
-            f"**使用通貨:** {data.get('currency', '不明')}"
-        ), inline=False)
-
-        embed.add_field(name="🏢 通信会社・ネットワーク", value=(
-            f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
-            f"**組織名 (Org):** {data.get('org', '不明')}\n"
-            f"**AS番号/名:** {data.get('as', '不明')} / {data.get('asname', '不明')}"
-        ), inline=False)
-
-        is_mobile = "🔴 モバイル回線 (4G/5G)" if data.get("mobile") else "🟢 固定回線など"
-        is_proxy = "🔴 VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
-        is_hosting = "🔴 サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
-        embed.add_field(name="🚨 特殊回線判定", value=f"**回線種類:** {is_mobile}\n**匿名ツール:** {is_proxy}\n**ホスティング:** {is_hosting}", inline=False)
-
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 4. 郵便番号検索コマンド（content_type対策済み） ---
+# --- 4. 郵便番号検索コマンド ---
 @bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
@@ -139,7 +118,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
                 data = await response.json(content_type=None)
                 
         if data.get("status") != 200 or not data.get("results"):
-            await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。郵便番号が正しいか確認してください。")
+            await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。")
             return
                 
         res = data["results"][0]
@@ -152,7 +131,7 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 5. ドメイン検索コマンド（IANAブートストラップを使った完全版） ---
+# --- 5. ドメイン検索コマンド ---
 @bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
 @app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
 async def lookup_domain(interaction: discord.Interaction, domain_name: str):
@@ -202,7 +181,7 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
             elif action == "expiration": expires = date
 
         embed = discord.Embed(title=f"🌐 ドメイン情報検索: {domain}", color=discord.Color.purple())
-        embed.add_field(name="📅 登録日 (作成日)", value=created, inline=True)
+        embed.add_field(name="📅 登録日", value=created, inline=True)
         embed.add_field(name="🔄 最終更新日", value=updated, inline=True)
         embed.add_field(name="⏳ 有効期限", value=expires, inline=True)
         await interaction.followup.send(embed=embed)
@@ -217,7 +196,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
     await interaction.response.defer(thinking=True)
     api_key = os.environ.get("VIRUSTOTAL_API_KEY")
     if not api_key:
-        await interaction.followup.send("⚠️ VirusTotalのAPIキーが設定されていません。環境変数を確認してください。")
+        await interaction.followup.send("⚠️ VirusTotalのAPIキーが設定されていません。")
         return
     
     headers = {"x-apikey": api_key}
@@ -232,7 +211,7 @@ async def check_url(interaction: discord.Interaction, target_url: str):
                     scan_url = "https://www.virustotal.com/api/v3/urls"
                     async with session.post(scan_url, headers=headers, data={"url": raw_url}) as p_resp:
                         if p_resp.status == 200:
-                            await interaction.followup.send("🔄 このURLは初めてチェックされました。現在解析中ですので、数十秒後にもう一度試してください！")
+                            await interaction.followup.send("🔄 このURLは初めてチェックされました。解析中ですので後ほど再試行してください。")
                             return
                 if response.status != 200:
                     await interaction.followup.send("⚠️ 安全チェックサーバーとの通信に失敗しました。")
@@ -242,23 +221,20 @@ async def check_url(interaction: discord.Interaction, target_url: str):
         stats = data["data"]["attributes"]["last_analysis_stats"]
         malicious = stats.get("malicious", 0)
         suspicious = stats.get("suspicious", 0)
-        harmless = stats.get("harmless", 0)
         
         if malicious > 0 or suspicious > 0:
             embed = discord.Embed(title="🚨 危険URL警告", color=discord.Color.red(), description=f"対象URL: {raw_url}")
-            embed.add_field(name="❌ 危険・詐欺判定件数", value=f"**{malicious}** 件のエンジンが危険と判定", inline=False)
-            embed.add_field(name="⚠️ 怪しい判定件数", value=f"{suspicious} 件", inline=True)
+            embed.add_field(name="❌ 危険・詐欺判定件数", value=f"**{malicious}** 件", inline=False)
         else:
             embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象URL: {raw_url}")
-            embed.add_field(name="✅ 判定結果", value="危険な要素は見つかりませんでした（安全）", inline=False)
+            embed.add_field(name="✅ 判定結果", value="安全です", inline=False)
         
-        embed.add_field(name="🔍 スキャン数", value=f"合計 {malicious + suspicious + harmless} 個のセキュリティエンジンで検証", inline=False)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 7. 複数ロール対応リアクションロール設置コマンド ---
+# --- 7. 複数ロール対応リアクションロール設置コマンド（重複チェック付き） ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
         super().__init__(style=discord.ButtonStyle.primary, label=label, emoji=emoji, custom_id=f"rr_{role_id}")
@@ -304,7 +280,8 @@ async def reactionrole_command(
         await interaction.response.send_message("❌ このコマンドを実行するには「ロールの管理」権限が必要です。", ephemeral=True)
         return
 
-    view = discord.ui.View(timeout=None)
+    # 入力されたロールのリストを作成
+    selected_roles = []
     roles_info = [(role1, label1, emoji1), (role2, label2, emoji2), (role3, label3, emoji3)]
 
     for role, label, emoji in roles_info:
@@ -312,9 +289,18 @@ async def reactionrole_command(
             if label is None:
                 await interaction.response.send_message(f"❌ ロール「{role.name}」に対してボタンのテキスト（label）が指定されていません。", ephemeral=True)
                 return
+            if role.id in selected_roles:
+                await interaction.response.send_message(f"❌ 同じロール（{role.name}）を複数選択することはできません。別のロールを指定してください。", ephemeral=True)
+                return
             if role.position >= interaction.guild.me.top_role.position:
                 await interaction.response.send_message(f"❌ ロール「{role.name}」は私のロールより権限が上のため付与できません。", ephemeral=True)
                 return
+            
+            selected_roles.append(role.id)
+
+    view = discord.ui.View(timeout=None)
+    for role, label, emoji in roles_info:
+        if role is not None:
             view.add_item(MultiReactionRoleButton(role_id=role.id, label=label, emoji=emoji))
 
     embed = discord.Embed(
