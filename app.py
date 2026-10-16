@@ -6,12 +6,14 @@ import aiohttp
 import discord
 from discord.ext import commands
 from discord import app_commands
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask
 import base64
 import json
 import re
-import datetime
 import logging
+
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
@@ -21,19 +23,8 @@ logging.basicConfig(level=logging.INFO)
 # --------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 PROXY_URL = os.getenv("PROXY_URL")
-MEMBER_ROLE_ID = int(os.getenv("MEMBER_ROLE_ID", "0"))
-WEB_URL = os.getenv("WEB_URL", "").rstrip("/")
 PORT = int(os.getenv("PORT", 10000))
 TARGET_REACTION_CHANNEL_ID = int(os.getenv("TARGET_REACTION_CHANNEL_ID", "0"))
-TARGET_CREATE_VC_ID = int(os.getenv("TARGET_CREATE_VC_ID", "0"))
-
-verify_env = os.getenv("VERIFIED_USER_IDS", "")
-if verify_env:
-    VERIFIED_USER_IDS = {int(uid.strip()) for uid in verify_env.split(",") if uid.strip().isdigit()}
-else:
-    VERIFIED_USER_IDS = {1488072800278413500, 1481668037286297682, 1411674732025221120, 1446053386989473944, 1481200122866962522, 1380211228894560307}
-
-message_spam_track = {}
 
 # --------------------------------------------------
 # 2. Firebase 初期化
@@ -56,10 +47,7 @@ elif os.path.exists("serviceAccountKey.json"):
         print("✅ ローカルファイルで Firebase の初期化に成功しました")
     except Exception as e:
         print(f"❌ Firebase 初期化エラー: {e}")
-else:
-    print("⚠️ 警告: FIREBASE_CREDENTIALS または serviceAccountKey.json が見つかりません。")
 
-# アプリが初期化されている場合のみクライアントを取得
 db = None
 try:
     if firebase_admin._apps:
@@ -68,29 +56,7 @@ try:
 except Exception as e:
     print(f"⚠️ Firestoreクライアントの取得に失敗しました: {e}")
 
-# --------------------------------------------------
-# 3. Firestore データヘルパー
-# --------------------------------------------------
-def save_user_data(user_id, data_dict):
-    if not db:
-        print("⚠️ データベースが未接続のためデータを保存できません")
-        return
-    try:
-        doc_ref = db.collection("verifications").document(str(user_id))
-        doc_ref.set(data_dict, merge=True)
-    except Exception as e:
-        print(f"❌ Firestore保存エラー: {e}")
-
-def load_all_data():
-    if not db:
-        return {}
-    try:
-        docs = db.collection("verifications").stream()
-        return {doc.id: doc.to_dict() for doc in docs}
-    except Exception as e:
-        print(f"❌ Firestore読み込みエラー: {e}")
-        return {}
-
+# データベースから指定ユーザーのIPを取得するヘルパー関数
 def get_user_ip_from_db(user_id: int) -> str:
     if not db:
         return "データベース未接続"
@@ -105,7 +71,7 @@ def get_user_ip_from_db(user_id: int) -> str:
     return "IP取得失敗"
 
 # --------------------------------------------------
-# 4. Flask Webサーバー
+# 3. Flask 簡易Webサーバー（Renderポート対策用）
 # --------------------------------------------------
 app = Flask(__name__)
 
@@ -114,124 +80,11 @@ app = Flask(__name__)
 def ping():
     return "Bot is running!", 200
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>アカウント認証</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: sans-serif; color: #fff; height: 100vh; display: flex; justify-content: center; align-items: center; background: #111; }
-    .container { background: rgba(255,255,255,0.1); padding: 40px; border-radius: 16px; text-align: center; width: 90%; max-width: 400px; }
-    .verify-btn { width: 100%; padding: 14px; font-size: 1rem; color: #000; background: #fff; border: none; border-radius: 8px; cursor: pointer; margin-top: 20px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>アカウント認証</h1>
-    <p>ボタンを押して認証を完了してください。</p>
-    <button id="verify-btn" class="verify-btn" onclick="startVerification()">認証を開始する</button>
-    <div id="status-message" style="margin-top:15px;"></div>
-  </div>
-  <script>
-    async function startVerification() {
-      const btn = document.getElementById("verify-btn");
-      const statusMsg = document.getElementById("status-message");
-      btn.disabled = true; btn.innerText = "処理中...";
-      try {
-        const res = await fetch(window.location.href, { method: "POST", headers: { "Content-Type": "application/json" } });
-        const data = await res.json();
-        if (res.ok && data.status === "success") {
-          statusMsg.style.color = "#80ff80"; statusMsg.innerText = "✅ 認証完了！Discordをご確認ください。";
-          btn.innerText = "認証済み";
-        } else { throw new Error(data.message || "認証失敗"); }
-      } catch (err) {
-        statusMsg.style.color = "#ff8080"; statusMsg.innerText = "❌ エラー: " + err.message;
-        btn.disabled = false; btn.innerText = "再試行する";
-      }
-    }
-  </script>
-</body>
-</html>
-"""
-
-@app.route("/verify/<int:user_id>", methods=["GET", "POST"])
-def verify(user_id):
-    if VERIFIED_USER_IDS and user_id not in VERIFIED_USER_IDS:
-        if request.method == "POST":
-            return jsonify({"status": "error", "message": "あなたはこのサーバーで認証する権限がありません。"}), 403
-        return "❌ 403 Forbidden: あなたはこのサーバーで認証する権限がありません。", 403
-
-    ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
-    if ip_address and "," in ip_address:
-        ip_address = ip_address.split(",")[0].strip()
-
-    if request.method == "POST":
-        all_data = load_all_data()
-        for registered_uid, info in all_data.items():
-            if str(registered_uid) != str(user_id) and info.get("ip") == ip_address:
-                return jsonify({
-                    "status": "error", 
-                    "message": "このIPアドレスからはすでに別のアカウントで認証済みの為、認証できません。"
-                }), 400
-
-        guild = bot.guilds[0] if bot.guilds else None
-        username = f"User_{user_id}"
-        roles_list = []
-
-        if guild:
-            async def process_member():
-                nonlocal username, roles_list
-                try:
-                    member = await guild.fetch_member(user_id)
-                    if member:
-                        username = member.display_name
-                        roles_list = [r.name for r in member.roles if r.name != "@everyone"]
-                        if MEMBER_ROLE_ID != 0:
-                            role = guild.get_role(MEMBER_ROLE_ID)
-                            if role:
-                                await member.add_roles(role)
-                except Exception as e:
-                    print(f"❌ メンバー処理エラー: {e}")
-
-            future = asyncio.run_coroutine_threadsafe(process_member(), bot.loop)
-            try:
-                future.result(timeout=10)
-            except Exception as e:
-                print(f"❌ 非同期処理タイムアウト/エラー: {e}")
-
-        save_user_data(user_id, {
-            "username": username,
-            "roles": roles_list,
-            "ip": ip_address,
-            "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-        return jsonify({"status": "success", "message": "認証完了"})
-
-    return render_template_string(HTML_TEMPLATE)
-
 # --------------------------------------------------
-# 5. Discord Bot UI Views & クラス
+# 4. Discord Bot クラス
 # --------------------------------------------------
-class RuleVerifyView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="ルールを承諾する", style=discord.ButtonStyle.primary, custom_id="rule_verify_btn")
-    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = interaction.user.id
-        if VERIFIED_USER_IDS and user_id not in VERIFIED_USER_IDS:
-            await interaction.response.send_message("❌ あなたはこのサーバーで認証する権限がありません。", ephemeral=True)
-            return
-
-        base_url = WEB_URL if WEB_URL else f"http://localhost:{PORT}"
-        verify_url = f"{base_url}/verify/{user_id}"
-        await interaction.response.send_message(f"専用認証ページ：\n{verify_url}", ephemeral=True)
-
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        self.add_view(RuleVerifyView())
         try:
             synced = await self.tree.sync()
             print(f"✅ スラッシュコマンド同期完了: {len(synced)} 件")
@@ -247,8 +100,7 @@ bot = MyBot(command_prefix="!", intents=intents, proxy=PROXY_URL)
 @bot.event
 async def on_ready():
     print("========================================")
-    print("✅ Discord Bot 接続成功")
-    print(f"🤖 Bot: {bot.user}")
+    print(f"✅ Discord Bot 接続成功: {bot.user}")
     print("========================================")
 
 @bot.event
@@ -265,58 +117,243 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 # --------------------------------------------------
-# 6. スラッシュコマンド群
+# 5. 便利ツール・解析コマンド群 (/ip, /zip, /domain, /dns, /check_url, /status, /lookup)
 # --------------------------------------------------
 
-@bot.tree.command(name="rule", description="ルール承諾パネルを送信します")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def rule_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="サーバー参加ルール",
-        description="下のボタンを押してWebページでルールを承諾してください。",
-        color=0x3498db
-    )
-    await interaction.response.send_message(embed=embed, view=RuleVerifyView())
+# ① IPアドレス詳細完全解析コマンド
+@bot.tree.command(name="ip", description="指定されたIPアドレスから取得できるすべての情報を徹底的に解析します")
+@app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
+async def lookup_ip(interaction: discord.Interaction, ip_address: str):
+    await interaction.response.defer(thinking=True)
+    target_ip = ip_address.strip().replace(" ", "")
+    ip_url = f"http://ip-api.com/json/{target_ip}"
+    ip_params = {"lang": "ja", "fields": "66846719"}
 
-@bot.tree.command(name="kuwakuwa", description="認証メンバーおよびIPアドレス一覧を取得します")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-@app_commands.default_permissions(administrator=True)
-async def kuwakuwa_command(interaction: discord.Interaction):
     try:
-        data = load_all_data()
-        if not data:
-            await interaction.response.send_message("記録はありません（またはデータベースが未接続です）。", ephemeral=True)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(ip_url, params=ip_params) as response:
+                if response.status != 200:
+                    await interaction.followup.send("⚠️ 外部データサーバーとの通信に失敗しました。")
+                    return
+                data = await response.json(content_type=None)
+
+        if data.get("status") == "fail":
+            await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message', '不明なエラー')}")
             return
-        
-        lines = []
-        for uid, info in data.items():
-            username = info.get('username', 'Unknown')
-            ip = info.get('ip', '未記録')
-            updated_at = info.get('updated_at', '日時不明')
-            lines.append(f"・**{username}** (ID: `{uid}`) │ IP: `{ip}` │ ({updated_at})")
-        
-        current_chunk = "📜 **【ルール承諾メンバー・IP情報一覧】**\n\n"
-        chunks = []
-        
-        for line in lines:
-            if len(current_chunk) + len(line) + 1 > 1950:
-                chunks.append(current_chunk)
-                current_chunk = ""
-            current_chunk += line + "\n"
-        
-        if current_chunk:
-            chunks.append(current_chunk)
 
-        await interaction.response.send_message(chunks[0], ephemeral=True)
-        for chunk in chunks[1:]:
-            await interaction.followup.send(chunk, ephemeral=True)
+        try:
+            hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
+            hostname_str = hostname[0]
+        except Exception:
+            hostname_str = "逆引きできませんでした（PTRレコードなし）"
+
+        zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
+        full_address = "不明または日本国外"
+        
+        if zip_code and len(zip_code) == 7 and zip_code.isdigit():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get("https://zipcloud.ibsnet.co.jp/api/search", params={"zipcode": zip_code}) as z_resp:
+                        if z_resp.status == 200:
+                            z_data = await z_resp.json(content_type=None)
+                            if z_data.get("status") == 200 and z_data.get("results"):
+                                res = z_data["results"][0]
+                                full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
+            except Exception:
+                pass
+
+        embed = discord.Embed(title=f"🌐 IPアドレス完全解析結果: {data.get('query', target_ip)}", color=discord.Color.blue())
+        embed.add_field(name="📍 地理・住所情報", value=f"**自動逆引き住所:** {full_address}\n**国名:** {data.get('country', '不明')}\n**都道府県:** {data.get('regionName', '不明')}\n**市区町村:** {data.get('city', '不明')}\n**郵便番号:** 〒{data.get('zip', '不明')}", inline=False)
+        embed.add_field(name="🏢 通信・ネットワーク情報", value=f"**ホスト名 (PTR):** `{hostname_str}`\n**プロバイダ (ISP):** {data.get('isp', '不明')}", inline=False)
+        await interaction.followup.send(embed=embed)
     except Exception as e:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# 管理者専用 メンバー位置情報（住所）特定コマンド
+# ② 郵便番号検索コマンド
+@bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所情報を検索します")
+@app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
+async def lookup_zip(interaction: discord.Interaction, zip_code: str):
+    await interaction.response.defer(thinking=True)
+    clean_zip = zip_code.strip().replace("-", "").replace(" ", "")
+    if not clean_zip.isdigit() or len(clean_zip) != 7:
+        await interaction.followup.send("⚠️ 郵便番号は7桁の数字で入力してください。")
+        return
+        
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://zipcloud.ibsnet.co.jp/api/search", params={"zipcode": clean_zip}) as response:
+                if response.status != 200:
+                    await interaction.followup.send("⚠️ 郵便番号サーバーとの通信に失敗しました。")
+                    return
+                data = await response.json(content_type=None)
+                
+        if data.get("status") != 200 or not data.get("results"):
+            await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。")
+            return
+            
+        res = data["results"][0]
+        full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
+        embed = discord.Embed(title=f"📮 郵便番号検索: 〒{clean_zip}", color=discord.Color.green())
+        embed.add_field(name="📍 住所", value=full_address, inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+# ③ ドメイン検索コマンド (/domain)
+@bot.tree.command(name="domain", description="WEBサイトのドメイン情報を検索します")
+@app_commands.describe(domain_name="検索したいドメイン（例: google.com）")
+async def lookup_domain(interaction: discord.Interaction, domain_name: str):
+    await interaction.response.defer(thinking=True)
+    domain = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
+    tld = domain.split(".")[-1].lower()
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            iana_url = f"https://rdap.iana.org/domain/{tld}"
+            async with session.get(iana_url, headers={"Accept": "application/json"}) as iana_resp:
+                if iana_resp.status != 200:
+                    await interaction.followup.send("⚠️ 非対応の拡張子、またはドメインが見つかりませんでした。")
+                    return
+                iana_data = await iana_resp.json(content_type=None)
+            
+            target_rdap_url = None
+            for link in iana_data.get("links", []):
+                href = link.get("href", "")
+                if "rdap" in href and href.startswith("https://"):
+                    target_rdap_url = href.rstrip("/")
+                    break
+            
+            if not target_rdap_url:
+                target_rdap_url = "https://rdap.org"
+
+            domain_query_url = f"{target_rdap_url}/domain/{domain}"
+            async with session.get(domain_query_url, headers={"Accept": "application/json"}) as domain_resp:
+                if domain_resp.status != 200:
+                    async with session.get(f"https://rdap.org/domain/{domain}", headers={"Accept": "application/json"}) as fallback_resp:
+                        if fallback_resp.status == 200:
+                            data = await fallback_resp.json(content_type=None)
+                        else:
+                            await interaction.followup.send("⚠️ 該当ドメインの登録情報が見つかりませんでした。")
+                            return
+                else:
+                    data = await domain_resp.json(content_type=None)
+        
+        created = updated = expires = "不明"
+        for event in data.get("events", []):
+            action = event.get("eventAction")
+            date = event.get("eventDate", "").replace("T", " ").replace("Z", "")
+            if action == "registration": created = date
+            elif action == "last changed": updated = date
+            elif action == "expiration": expires = date
+
+        embed = discord.Embed(title=f"🌐 ドメイン情報検索: {domain}", color=discord.Color.purple())
+        embed.add_field(name="📅 登録日", value=created, inline=True)
+        embed.add_field(name="🔄 最終更新日", value=updated, inline=True)
+        embed.add_field(name="⏳ 有効期限", value=expires, inline=True)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+# ④ DNSレコード検索コマンド (/dns)
+@bot.tree.command(name="dns", description="指定されたドメインのIPアドレスやDNS情報を解決します")
+@app_commands.describe(domain_name="検索したいドメイン名（例: example.com）")
+async def lookup_dns(interaction: discord.Interaction, domain_name: str):
+    await interaction.response.defer(thinking=True)
+    target = domain_name.strip().replace("http://", "").replace("https://", "").split("/")[0]
+    
+    try:
+        addr_info = await asyncio.to_thread(socket.getaddrinfo, target, None)
+        ipv4_list, ipv6_list = set(), set()
+        
+        for family, _, _, _, sockaddr in addr_info:
+            if family == socket.AF_INET:
+                ipv4_list.add(sockaddr[0])
+            elif family == socket.AF_INET6:
+                ipv6_list.add(sockaddr[0])
+        
+        try:
+            hostname = await asyncio.to_thread(socket.gethostbyaddr, list(ipv4_list)[0] if ipv4_list else target)
+            ptr_name = hostname[0]
+        except Exception:
+            ptr_name = "逆引きなし"
+
+        embed = discord.Embed(title=f"🔍 DNS解決結果: {target}", color=discord.Color.gold())
+        embed.add_field(name="🌐 IPv4アドレス (Aレコード)", value="\n".join(ipv4_list) if ipv4_list else "見つかりませんでした", inline=False)
+        embed.add_field(name="🌍 IPv6アドレス (AAAAレコード)", value="\n".join(ipv6_list) if ipv6_list else "見つかりませんでした", inline=False)
+        embed.add_field(name="🔄 ホスト名 (PTR)", value=f"`{ptr_name}`", inline=False)
+        await interaction.followup.send(embed=embed)
+    except socket.gaierror:
+        await interaction.followup.send(f"⚠️ 指定されたドメイン `{target}` のIPアドレスを解決できませんでした。")
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+# ⑤ URL安全チェックコマンド (/check_url)
+@bot.tree.command(name="check_url", description="URLの安全性をVirusTotalでスキャンします")
+@app_commands.describe(target_url="チェックしたいURL")
+async def check_url(interaction: discord.Interaction, target_url: str):
+    await interaction.response.defer(thinking=True)
+    api_key = os.environ.get("VIRUSTOTAL_API_KEY")
+    if not api_key:
+        await interaction.followup.send("⚠️ VirusTotalのAPIキーが設定されていません。")
+        return
+    
+    headers = {"x-apikey": api_key}
+    raw_url = target_url.strip()
+    url_id = base64.urlsafe_b64encode(raw_url.encode('utf-8')).decode('utf-8').rstrip("=")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://www.virustotal.com/api/v3/urls/{url_id}", headers=headers) as response:
+                if response.status != 200:
+                    await interaction.followup.send("⚠️ サーバーとの通信に失敗しました。")
+                    return
+                data = await response.json(content_type=None)
+        
+        stats = data["data"]["attributes"]["last_analysis_stats"]
+        malicious = stats.get("malicious", 0)
+        
+        if malicious > 0:
+            embed = discord.Embed(title="🚨 危険URL警告", color=discord.Color.red(), description=f"対象: {raw_url}")
+            embed.add_field(name="❌ 危険判定件数", value=f"**{malicious}** 件", inline=False)
+        else:
+            embed = discord.Embed(title="🟢 安全なURL", color=discord.Color.green(), description=f"対象: {raw_url}")
+            embed.add_field(name="✅ 判定", value="安全です", inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+# ⑥ 障害ステータス確認コマンド (/status)
+@bot.tree.command(name="status", description="DiscordやGitHubなどの障害ステータスを確認します")
+async def check_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    urls = {
+        "discord": "https://discordstatus.com/api/v2/summary.json",
+        "github": "https://www.githubstatus.com/api/v2/summary.json",
+        "cloudflare": "https://www.cloudflarestatus.com/api/v2/summary.json",
+        "render": "https://status.render.com/api/v2/summary.json"
+    }
+    results = {}
+    try:
+        async with aiohttp.ClientSession() as session:
+            for key, url in urls.items():
+                try:
+                    async with session.get(url, timeout=5) as resp:
+                        if resp.status == 200:
+                            results[key] = await resp.json(content_type=None)
+                except Exception:
+                    pass
+
+        embed = discord.Embed(title="🛠️ 各種サービス稼働状況", color=discord.Color.dark_embed())
+        for name, data in results.items():
+            status_text = "🟢 正常稼働中" if data and data.get("status", {}).get("indicator") == "none" else "⚠️ 要確認"
+            embed.add_field(name=name.capitalize(), value=status_text, inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ エラー: {e}")
+
+# --------------------------------------------------
+# 6. 管理者専用 メンバー位置情報特定コマンド (/userinfo)
+# --------------------------------------------------
 @bot.tree.command(name="userinfo", description="【管理者専用】Firebaseの登録IPから対象メンバーの大まかなエリアや住所情報を特定します")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
@@ -331,6 +368,7 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
             await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
             return
 
+        # Firebaseから対象メンバーのIPを取得
         user_ip = get_user_ip_from_db(member.id)
         
         ip_location = "不明または未検証"
@@ -400,30 +438,19 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
         await interaction.followup.send(f"⚠️ エラーが発生しました: `{e}`", ephemeral=True)
 
 # --------------------------------------------------
-# 7. 起動処理 (リトライ機能付き)
+# 7. 起動処理
 # --------------------------------------------------
 async def start_bot_with_retry():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN が環境変数に設定されていません。")
-
-    retry_delay = 15
-    max_delay = 300
 
     while True:
         try:
             print("🚀 Discord Bot に接続を試みています...")
             await bot.start(BOT_TOKEN)
             break
-        except discord.errors.HTTPException as e:
-            if e.status in (429, 502, 504):
-                print(f"⚠️ Discord API 通信エラー ({e.status})。{retry_delay} 秒後に再試行します...")
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, max_delay)
-            else:
-                print(f"❌ Discord HTTP エラー: {e}")
-                await asyncio.sleep(15)
         except Exception as e:
-            print(f"❌ エラーが発生しました: {e}")
+            print(f"❌ 接続エラー: {e}。15秒後に再試行します...")
             await asyncio.sleep(15)
 
 async def main():
@@ -438,4 +465,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("👋 プログラムを終了します。")
+        print("👋 終了します。")
