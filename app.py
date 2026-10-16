@@ -23,7 +23,7 @@ intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True 
 
-TARGET_REACTION_CHANNEL_ID = int(os.environ.get("TARGET_REACTION_CHANNEL_ID", "0"))
+TARGET_REACTION_CHANNEL_ID = int(os.environ.get("1555586163430137867", "0"))
 
 class ReactionRolePersistentView(discord.ui.View):
     def __init__(self):
