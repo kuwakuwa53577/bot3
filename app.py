@@ -357,7 +357,13 @@ async def check_status(interaction: discord.Interaction):
                 async with session.get(github_status_url, timeout=5) as resp:
                     if resp.status == 200:
                         github_data = await resp.json(content_type=None)
+            except Exception:
+                pass
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ 通信セッションの確立に失敗しました: {e}")
+        return
         
+    try:
         embed = discord.Embed(title="🛠️ 各種サービス障害・稼働状況", color=discord.Color.dark_embed())
         
         # --- Discordの判定 ---
@@ -374,7 +380,6 @@ async def check_status(interaction: discord.Interaction):
             else:
                 dc_text = f"🔴 **大規模な障害発生中**\n説明: {status_description}"
                 
-            # 発生中のインシデントがあれば追加
             incidents = discord_data.get("incidents", [])
             if incidents:
                 active_incidents = [inc["name"] for inc in incidents if inc.get("status") != "resolved"]
@@ -413,8 +418,7 @@ async def check_status(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
-        await interaction.followup.send(f"⚠️ 障害情報の取得中にエラーが発生しました: {e}")
-
+        await interaction.followup.send(f"⚠️ 障害情報の構築中にエラーが発生しました: {e}")
 
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
