@@ -23,7 +23,7 @@ intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True 
 
-TARGET_REACTION_CHANNEL_ID = int(os.environ.get("1555586163430137867", "0"))
+TARGET_REACTION_CHANNEL_ID = int(os.environ.get("TARGET_REACTION_CHANNEL_ID", "0"))
 
 class ReactionRolePersistentView(discord.ui.View):
     def __init__(self):
@@ -62,7 +62,7 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-# --- 3. IPアドレス検索コマンド（詳細情報をすべて表示するように修正版） ---
+# --- 3. IPアドレス検索コマンド ---
 @bot.tree.command(name="ip", description="指定されたIPアドレスの国、都市、プロバイダ、住所情報を検索します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -103,10 +103,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             except Exception:
                 full_address = "住所逆引き中にエラーが発生しました"
 
-        # 埋め込み（Embed）を作成
         embed = discord.Embed(title=f"🌐 IPアドレス詳細解析結果: {data.get('query', target_ip)}", color=discord.Color.blue())
-        
-        # 1. 住所・タイムゾーン
         embed.add_field(name="📍 住所・タイムゾーン", value=(
             f"**自動逆引き住所:** {full_address}\n"
             f"**国名:** {data.get('country', '不明')} ({data.get('countryCode', '-')})\n"
@@ -115,22 +112,16 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             f"**郵便番号:** 〒{data.get('zip', '不明')}\n"
             f"**タイムゾーン:** {data.get('timezone', '不明')}"
         ), inline=False)
-
-        # 2. 座標・時差・通貨
         embed.add_field(name="🧭 座標・時差・通貨", value=(
             f"**緯度/経度:** {data.get('lat', '-')}, {data.get('lon', '-')}\n"
             f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間\n"
             f"**使用通貨:** {data.get('currency', '不明')}"
         ), inline=False)
-
-        # 3. 通信会社・ネットワーク
         embed.add_field(name="🏢 通信会社・ネットワーク", value=(
             f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
             f"**組織名 (Org):** {data.get('org', '不明')}\n"
             f"**AS番号/名:** {data.get('as', '不明')} / {data.get('asname', '不明')}"
         ), inline=False)
-
-        # 4. 特殊回線判定
         is_mobile = "🔴 モバイル回線 (4G/5G)" if data.get("mobile") else "🟢 固定回線など"
         is_proxy = "🔴 VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
         is_hosting = "🔴 サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
@@ -141,8 +132,8 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 4. 郵便番号検索コマンド ---
-@bot.tree.command(name="zip", description="日本の郵便番号から住所を検索します")
+# --- 4. 郵便番号検索コマンド（詳細情報を完全網羅） ---
+@bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所・ローマ字情報を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     await interaction.response.defer(thinking=True)
@@ -165,10 +156,35 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
             return
                 
         res = data["results"][0]
-        full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
         
-        embed = discord.Embed(title=f"📮 郵便番号検索結果: 〒{clean_zip[:3]}-{clean_zip[3:]}", color=discord.Color.green())
-        embed.add_field(name="📍 住所", value=full_address, inline=False)
+        # 郵便番号から読み取れる詳細なデータを分解
+        pref_code = res.get('prefcode', '不明') # 都道府県コード
+        zip7 = res.get('zipcode', clean_zip)    # 7桁郵便番号
+        
+        # 漢字の住所
+        address1 = res.get('address1', '') # 都道府県
+        address2 = res.get('address2', '') # 市区町村
+        address3 = res.get('address3', '') # 町域
+        full_address = f"{address1}{address2}{address3}"
+        
+        # ローマ字の住所
+        kana1 = res.get('kana1', '')
+        kana2 = res.get('kana2', '')
+        kana3 = res.get('kana3', '')
+        full_kana = f"{kana1} {kana2} {kana3}"
+
+        # 埋め込み（Embed）を作成
+        embed = discord.Embed(title=f"📮 郵便番号詳細検索結果: 〒{zip7[:3]}-{zip7[3:]}", color=discord.Color.green())
+        
+        embed.add_field(name="📍 住所情報", value=(
+            f"**完全な住所:** {full_address}\n"
+            f"**都道府県:** {address1} (コード: {pref_code})\n"
+            f"**市区町村:** {address2}\n"
+            f"**町域:** {address3 if address3 else '指定なし'}"
+        ), inline=False)
+
+        embed.add_field(name="🔤 カナ（読み）情報", value=f"`{full_kana}`", inline=False)
+
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
@@ -316,7 +332,7 @@ class MultiReactionRoleButton(discord.ui.Button):
 async def reactionrole_command(
     interaction: discord.Interaction, 
     role1: discord.Role, label1: str, emoji1: str = None,
-    role2: discord.Role = None, label2: str = None, emoji2: str = None,
+    role2: discord.Role = None, label2: str, emoji2: str = None,
     role3: discord.Role = None, label3: str = None, emoji3: str = None
 ):
     if not interaction.user.guild_permissions.manage_roles:
