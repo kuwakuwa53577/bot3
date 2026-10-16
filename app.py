@@ -691,91 +691,106 @@ async def lookup_all(interaction: discord.Interaction, target: str):
     embed.set_footer(text="マルチデータソース: ip-api, zipcloud, RDAP, Local DNS")
     await interaction.followup.send(embed=embed)
 
-# --- 15. 管理者専用 メンバー特定・調査コマンド（修正版） ---
-@bot.tree.command(name="userinfo", description="【管理者専用】特定メンバーの詳細情報やアカウント履歴、プロフィール上の地域を調査します")
+# --- 16. 管理者専用 Firebase連動 ユーザー位置情報（住所）特定コマンド ---
+@bot.tree.command(name="userinfo", description="【管理者専用】Firebaseの登録IPから対象メンバーの大まかなエリアや住所情報を特定します")
 @app_commands.checks.has_permissions(administrator=True) # 管理者権限が必要
 @app_commands.describe(member="調査したいDiscordメンバーを選択してください")
 async def user_info_command(interaction: discord.Interaction, member: discord.Member):
-    await interaction.response.defer(thinking=True, ephemeral=True) # 管理者だけにプライベート表示
+    await interaction.response.defer(thinking=True, ephemeral=True) # 管理者にだけプライベート表示
     
-    try:
-        guild = interaction.guild
-        if not guild:
-            await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
-            return
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
+        return
 
-        # ロール一覧の作成（@everyone を除く）
-        roles = [role.mention for role in member.roles if role != guild.default_role]
-        roles_str = ", ".join(roles) if roles else "ロールなし"
-        if len(roles_str) > 1024:
-            roles_str = f"合計 {len(member.roles) - 1} 個のロール（文字数制限のため省略）"
+    # 1. 既存の関数を使ってFirebaseからIPアドレスを取得
+    user_ip = get_user_ip_from_db(member.id)
+    
+    ip_location = "不明または未検証"
+    detailed_address = "特定不可（IPデータなし）"
+    isp_info = "不明"
+    google_maps_url = None
 
-        # アカウント作成日とサーバー参加日を日本語のフォーマットに変換
-        created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
-        # ※ ここを修正しました (joined_text -> joined_at)
-        joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
-
-        # バッジやボット判定
-        is_bot = "🤖 ボット (Bot)" if member.bot else "👤 一般ユーザー"
+    # 2. 取得したIPが有効なIPアドレスの場合、APIで住所・エリア情報を逆引き解析
+    if user_ip and user_ip not in ["データベース未接続", "IP未記録", "IP取得失敗"]:
+        ip_url = f"http://ip-api.com/json/{user_ip}"
+        ip_params = {"lang": "ja", "fields": "66846719"}
         
-        # 状態（ステータス）の判定
-        status_emoji = {
-            discord.Status.online: "🟢 オンライン",
-            discord.Status.idle: "🟡 退席中",
-            discord.Status.dnd: "🔴 取り込み中",
-            discord.Status.offline: "⚫ オフライン / 非表示"
-        }.get(member.status, "⚪ 不明")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(ip_url, params=ip_params, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if data.get("status") == "success":
+                            country = data.get("country", "")
+                            region = data.get("regionName", "")
+                            city = data.get("city", "")
+                            district = data.get("district", "")
+                            ip_location = f"{country} {region} {city} {district}".strip()
+                            isp_info = f"{data.get('isp', '不明')} ({data.get('org', '')})"
+                            
+                            # 郵便番号が取得できた場合は zipcloud で町域レベルまでさらに詳細特定
+                            zip_code = data.get("zip", "").strip()
+                            if zip_code and len(zip_code) == 7 and zip_code.isdigit():
+                                async with session.get("https://zipcloud.ibsnet.co.jp/api/search", params={"zipcode": zip_code}, timeout=5) as z_resp:
+                                    if z_resp.status == 200:
+                                        z_data = await z_resp.json(content_type=None)
+                                        if z_data.get("status") == 200 and z_data.get("results"):
+                                            res = z_data["results"][0]
+                                            detailed_address = f"〒{zip_code[:3]}-{zip_code[3:]} ➔ **{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}**"
+                            
+                            # 緯度・経度からGoogle Mapsリンクを作成
+                            lat = data.get("lat")
+                            lon = data.get("lon")
+                            if lat and lon:
+                                google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+        except Exception as e:
+            ip_location = f"位置情報解析エラー: {e}"
 
-        # アクティビティやカスタムステータスから地域・住所の手がかりを探す
-        detected_location = "プロフィールから検出されませんでした"
-        activities = []
-        
-        for activity in member.activities:
-            if isinstance(activity, discord.Game):
-                activities.append(f"🎮 プレイ中: {activity.name}")
-            elif isinstance(activity, discord.Streaming):
-                activities.append(f"📺 配信中: [{activity.name}]({activity.url})")
-            elif isinstance(activity, discord.Spotify):
-                activities.append(f"🎵 Spotify: {activity.title} by {activity.artist}")
-            elif isinstance(activity, discord.CustomActivity):
-                if activity.name:
-                    activities.append(f"💬 ステータス: {activity.name}")
-                    if any(keyword in activity.name for keyword in ["都", "道", "府", "県", "市", "区", "町", "村"]):
-                        detected_location = f"ステータスより推測: `{activity.name}`"
+    # 3. Discord側の基本プロフィール情報の整理
+    roles = [role.mention for role in member.roles if role != guild.default_role]
+    roles_str = ", ".join(roles) if roles else "ロールなし"
+    created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
+    joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
+    is_bot = "🤖 ボット (Bot)" if member.bot else "👤 一般ユーザー"
 
-        activity_str = "\n".join(activities) if activities else "アクティビティなし"
+    # 4. Embedの構築
+    embed = discord.Embed(
+        title=f"🔍 メンバー位置情報特定: {member.display_name}",
+        color=discord.Color.red(),
+        description=f"対象ユーザー: {member.mention} (`{member.id}`)\n※Firebaseの認証データ（`verifications`）からIPを抽出し特定しています。"
+    )
+    
+    if member.avatar:
+        embed.set_thumbnail(url=member.avatar.url)
 
-        # Embedの構築
-        embed = discord.Embed(
-            title=f"🔍 メンバー調査結果: {member.display_name}",
-            color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
-            description=f"対象ユーザー: {member.mention} (`{member.id}`)\n※Discordの仕様上、IPや実住所を直接取得することはできません。以下は公開情報およびステータスからの推定です。"
-        )
-        
-        if member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
+    # 住所・位置情報フィールド
+    embed.add_field(name="📍 データベースIPに基づく特定住所", value=f"### `{detailed_address if detailed_address != '特定不可（IPデータなし）' else ip_location}`", inline=False)
+    
+    # ネットワーク詳細
+    net_text = (
+        f"**記録されたIP:** `{user_ip}`\n"
+        f"**推定エリア:** {ip_location}\n"
+        f"**プロバイダ (ISP):** {isp_info}"
+    )
+    embed.add_field(name="🌐 ネットワーク・ISP情報", value=net_text, inline=False)
 
-        embed.add_field(name="📌 基本属性", value=f"**アカウント種別:** {is_bot}\n**現在のステータス:** {status_emoji}", inline=False)
-        embed.add_field(name="📍 地域・住所の手がかり", value=f"### `{detected_location}`", inline=False)
-        embed.add_field(name="📅 日時情報", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
-        embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
-        embed.add_field(name="🎮 アクティビティ", value=activity_str, inline=False)
-        
-        if member.voice and member.voice.channel:
-            embed.add_field(name="🔊 ボイスチャンネル", value=f"参加中: `{member.voice.channel.name}`", inline=False)
+    if google_maps_url:
+        embed.add_field(name="🗺️ マップ確認", value=`[推定位置をGoogle Mapsで開く]({google_maps_url})`, inline=False)
 
-        embed.set_footer(text=f"実行者: {interaction.user.name} | サーバー名: {guild.name}")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+    # アカウント履歴
+    embed.add_field(name="📅 Discordアカウント履歴", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
+    embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
 
-    except Exception as e:
-        # 万が一エラーが起きても「考え中」で固まらず、エラー内容を管理者だけに通知するように保護
-        await interaction.followup.send(f"⚠️ データの取得中にエラーが発生しました: `{e}`", ephemeral=True)
+    embed.set_footer(text=f"管理者専用機能 | 実行者: {interaction.user.name}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # エラーハンドリング
 @user_info_command.error
 async def user_info_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ このコマンドはサーバーの管理者のみが使用できます。", ephemeral=True)
+        
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str, emoji=None):
