@@ -64,8 +64,8 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-# --- 3. IPアドレス検索コマンド ---
-@bot.tree.command(name="ip", description="指定されたIPアドレスの詳細情報を徹底的に解析します")
+# --- 3. IPアドレス詳細完全解析コマンド（すべての情報を網羅） ---
+@bot.tree.command(name="ip", description="指定されたIPアドレスから取得できるすべての情報を徹底的に解析します")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
@@ -73,6 +73,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
     
+    # ip-api.com から全フィールド（ビットマスク: 66846719）を取得
     ip_url = f"http://ip-api.com/json/{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
@@ -85,17 +86,20 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
                 data = await response.json(content_type=None)
 
         if data.get("status") == "fail":
-            await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message')}")
+            await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message', '不明なエラー')}")
             return
 
+        # 逆引き（PTRレコード）の取得
         try:
             hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
             hostname_str = hostname[0]
         except Exception:
             hostname_str = "逆引きできませんでした（PTRレコードなし）"
 
+        # 郵便番号から日本の詳細住所を逆引き
         zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
         full_address = "不明または日本国外"
+        pref_code = data.get("prefcode", "不明")
         
         if zip_code and len(zip_code) == 7 and zip_code.isdigit():
             zip_url = "https://zipcloud.ibsnet.co.jp/api/search"
@@ -108,39 +112,77 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
                             if z_data.get("status") == 200 and z_data.get("results"):
                                 res = z_data["results"][0]
                                 full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
+                                pref_code = res.get('prefcode', pref_code)
             except Exception:
                 full_address = "住所逆引き中にエラーが発生しました"
 
-        embed = discord.Embed(title=f"🌐 IPアドレス詳細解析結果: {data.get('query', target_ip)}", color=discord.Color.blue())
-        embed.add_field(name="📍 住所・タイムゾーン", value=(
-            f"**自動逆引き住所:** {full_address}\n"
-            f"**国名:** {data.get('country', '不明')} ({data.get('countryCode', '-')})\n"
-            f"**都道府県/州:** {data.get('regionName', '不明')}\n"
-            f"**都市/区:** {data.get('city', '不明')} / {data.get('district', 'なし')}\n"
-            f"**郵便番号:** 〒{data.get('zip', '不明')}\n"
-            f"**タイムゾーン:** {data.get('timezone', '不明')}"
-        ), inline=False)
-        embed.add_field(name="🧭 座標・時差・通貨", value=(
-            f"**緯度/経度:** {data.get('lat', '-')}, {data.get('lon', '-')}\n"
-            f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間\n"
-            f"**使用通貨:** {data.get('currency', '不明')}"
-        ), inline=False)
-        embed.add_field(name="🏢 通信会社・ネットワーク", value=(
-            f"**ホスト名 (PTR):** `{hostname_str}`\n"
-            f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
-            f"**組織名 (Org):** {data.get('org', '不明')}\n"
-            f"**AS番号/名:** {data.get('as', '不明')} / {data.get('asname', '不明')}"
-        ), inline=False)
-        is_mobile = "🔴 モバイル回線 (4G/5G)" if data.get("mobile") else "🟢 固定回線など"
-        is_proxy = "⚠️ VPN / プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
-        is_hosting = "⚠️ サーバー（データセンター）" if data.get("hosting") else "🟢 通常の一般回線"
-        embed.add_field(name="🚨 特殊回線・脅威判定", value=f"**回線種類:** {is_mobile}\n**匿名ツール:** {is_proxy}\n**ホスティング:** {is_hosting}", inline=False)
-
+        # Embedの構築（すべての取得情報を網羅）
+        embed = discord.Embed(
+            title=f"🌐 IPアドレス完全解析結果: {data.get('query', target_ip)}", 
+            color=discord.Color.blue(),
+            description="IPジオロケーションAPIおよびDNS逆引きから抽出した全データ"
+        )
+        
+        # 1. 地理・住所情報
+        embed.add_field(
+            name="📍 地理・住所情報", 
+            value=(
+                f"**自動逆引き住所:** {full_address}\n"
+                f"**国名:** {data.get('country', '不明')} ({data.get('countryCode', '-')})\n"
+                f"**都道府県/州:** {data.get('regionName', '不明')} (JISコード: {pref_code})\n"
+                f"**市区町村:** {data.get('city', '不明')}\n"
+                f"**地域/地区:** {data.get('district', 'なし')}\n"
+                f"**郵便番号:** 〒{data.get('zip', '不明')}"
+            ), 
+            inline=False
+        )
+        
+        # 2. 座標・タイムゾーン・文化
+        embed.add_field(
+            name="🧭 座標・時差・通貨", 
+            value=(
+                f"**緯度 / 経度:** {data.get('lat', '-')}, {data.get('lon', '-')}\n"
+                f"**タイムゾーン:** {data.get('timezone', '不明')}\n"
+                f"**UTC時差:** {data.get('offset', 0) / 3600:+g} 時間 ({data.get('offset', 0)}秒)\n"
+                f"**使用通貨:** {data.get('currency', '不明')}"
+            ), 
+            inline=False
+        )
+        
+        # 3. 通信会社・ネットワーク情報
+        embed.add_field(
+            name="🏢 通信・ネットワーク情報", 
+            value=(
+                f"**ホスト名 (PTR):** `{hostname_str}`\n"
+                f"**プロバイダ (ISP):** {data.get('isp', '不明')}\n"
+                f"**組織名 (Org):** {data.get('org', '不明')}\n"
+                f"**AS番号:** {data.get('as', '不明')}\n"
+                f"**AS組織名:** {data.get('asname', '不明')}"
+            ), 
+            inline=False
+        )
+        
+        # 4. 回線種類・セキュリティ判定フラグ
+        is_mobile = "🔴 モバイル回線 (4G/5G/LTE)" if data.get("mobile") else "🟢 固定回線 / ブロードバンド"
+        is_proxy = "⚠️ VPN・プロキシ検出" if data.get("proxy") else "🟢 通常の接続"
+        is_hosting = "⚠️ データセンター（サーバー・VPS）" if data.get("hosting") else "🟢 通常の一般回線"
+        
+        embed.add_field(
+            name="🚨 回線種類・脅威判定フラグ", 
+            value=(
+                f"**回線タイプ:** {is_mobile}\n"
+                f"**匿名化ツール:** {is_proxy}\n"
+                f"**ホスティング:** {is_hosting}"
+            ), 
+            inline=False
+        )
+        
+        embed.set_footer(text=f"APIステータス: {data.get('status')} | 取得フィールド数: 20+項目の網羅的解析")
         await interaction.followup.send(embed=embed)
+        
     except Exception as e:
-        await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
-
-
+        await interaction.followup.send(f"⚠️ 予期せぬエラーが発生しました: {e}")
+        
 # --- 4. 郵便番号検索コマンド ---
 @bot.tree.command(name="zip", description="日本の郵便番号から行政コードや詳細な住所情報を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
@@ -498,6 +540,230 @@ async def create_private_room(interaction: discord.Interaction, target_user: dis
         await interaction.followup.send("❌ ボットに「チャンネルの管理」権限がありません。")
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
+
+import re
+
+# IPアドレス判定用ヘルパー関数
+def is_valid_ip(address: str) -> bool:
+    # IPv4 / IPv6 の簡単なフォーマットチェック
+    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    ipv6_pattern = r'^[0-9a-fA-F:]+$'
+    return bool(re.match(ipv4_pattern, address) or (':' in address and re.match(ipv6_pattern, address)))
+
+# --- 13. IP・ドメイン・DNS 一括完全解析コマンド ---
+@bot.tree.command(name="lookup", description="IPアドレスまたはドメインを入力し、IP位置情報・DNS・WHOIS情報を一括解析します")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(target="解析したいIPアドレスまたはドメイン名（例: 8.8.8.8 または google.com）")
+async def lookup_all(interaction: discord.Interaction, target: str):
+    await interaction.response.defer(thinking=True)
+    
+    # 整形（http, https, パス等の除去）
+    clean_target = target.strip().replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
+    
+    target_ip = None
+    target_domain = None
+    
+    if is_valid_ip(clean_target):
+        target_ip = clean_target
+    else:
+        target_domain = clean_target
+
+    # 1. DNS解決 (A / AAAA レコード)
+    ipv4_list = set()
+    ipv6_list = set()
+    ptr_hostname = "逆引きなし"
+    
+    dns_target = target_domain if target_domain else target_ip
+    try:
+        addr_info = await asyncio.to_thread(socket.getaddrinfo, dns_target, None)
+        for family, _, _, _, sockaddr in addr_info:
+            if family == socket.AF_INET:
+                ipv4_list.add(sockaddr[0])
+            elif family == socket.AF_INET6:
+                ipv6_list.add(sockaddr[0])
+                
+        # IPが直接入力されていない場合は、解決された最初のIPv4をIP調査対象にする
+        if not target_ip and ipv4_list:
+            target_ip = list(ipv4_list)[0]
+    except Exception:
+        pass
+
+    # Reverse DNS (PTR) の取得
+    if target_ip:
+        try:
+            hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
+            ptr_hostname = hostname[0]
+            # ドメイン未入力でPTRからドメインが取れた場合
+            if not target_domain and "." in ptr_hostname:
+                parts = ptr_hostname.split(".")
+                if len(parts) >= 2:
+                    target_domain = ".".join(parts[-2:])
+        except Exception:
+            ptr_hostname = "PTRレコードなし"
+
+    # 2. IPジオロケーション＆ネットワーク情報の取得
+    ip_data = {}
+    full_address = "不明または日本国外"
+    if target_ip:
+        ip_url = f"http://ip-api.com/json/{target_ip}"
+        ip_params = {"lang": "ja", "fields": "66846719"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(ip_url, params=ip_params) as resp:
+                    if resp.status == 200:
+                        ip_data = await resp.json(content_type=None)
+                        
+            # 郵便番号から詳細住所の逆引き
+            zip_code = ip_data.get("zip", "").strip().replace("-", "").replace(" ", "")
+            if zip_code and len(zip_code) == 7 and zip_code.isdigit():
+                zip_url = "https://zipcloud.ibsnet.co.jp/api/search"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(zip_url, params={"zipcode": zip_code}) as z_resp:
+                        if z_resp.status == 200:
+                            z_data = await z_resp.json(content_type=None)
+                            if z_data.get("status") == 200 and z_data.get("results"):
+                                res = z_data["results"][0]
+                                full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
+        except Exception:
+            pass
+
+    # 3. ドメイン (RDAP/WHOIS) 情報の取得
+    domain_data = {}
+    created_date = updated_date = expires_date = "不明"
+    if target_domain:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://rdap.org/domain/{target_domain}", headers={"Accept": "application/json"}) as d_resp:
+                    if d_resp.status == 200:
+                        domain_data = await d_resp.json(content_type=None)
+                        for event in domain_data.get("events", []):
+                            action = event.get("eventAction")
+                            date = event.get("eventDate", "").replace("T", " ").replace("Z", "")
+                            if action == "registration": created_date = date
+                            elif action == "last changed": updated_date = date
+                            elif action == "expiration": expires_date = date
+        except Exception:
+            pass
+
+    # Embed構築
+    embed = discord.Embed(
+        title=f"🔍 ネットワーク一括解析結果: {clean_target}",
+        color=discord.Color.dark_purple(),
+        description=f"対象: `{clean_target}`（IP解析 + DNS解決 + RDAPドメイン情報）"
+    )
+
+    # フィールド1: DNS & 接続解決
+    dns_text = (
+        f"**解析可能IP (v4):** {', '.join(ipv4_list) if ipv4_list else 'なし / 解決不能'}\n"
+        f"**解析可能IP (v6):** {', '.join(ipv6_list) if ipv6_list else 'なし'}\n"
+        f"**PTR (Reverse DNS):** `{ptr_hostname}`"
+    )
+    embed.add_field(name="🌐 DNS・IP解決情報", value=dns_text, inline=False)
+
+    # フィールド2: 地理・回線情報（IPが存在する場合）
+    if ip_data and ip_data.get("status") == "success":
+        is_mobile = "🔴 モバイル (4G/5G)" if ip_data.get("mobile") else "🟢 固定回線"
+        is_proxy = "⚠️ VPN/プロキシ" if ip_data.get("proxy") else "🟢 通常接続"
+        is_hosting = "⚠️ データセンター/VPS" if ip_data.get("hosting") else "🟢 一般回線"
+        
+        geo_text = (
+            f"**対象IP:** `{ip_data.get('query', target_ip)}`\n"
+            f"**位置:** {ip_data.get('country', '不明')} / {ip_data.get('regionName', '不明')} / {ip_data.get('city', '不明')}\n"
+            f"**逆引き住所:** {full_address}\n"
+            f"**座標 (緯度/経度):** {ip_data.get('lat', '-')}, {ip_data.get('lon', '-')}\n"
+            f"**ISP / 組織:** {ip_data.get('isp', '不明')} / {ip_data.get('org', '不明')}\n"
+            f"**AS情報:** {ip_data.get('as', '不明')}\n"
+            f"**回線属性:** {is_mobile} | {is_proxy} | {is_hosting}"
+        )
+        embed.add_field(name="📍 IPジオロケーション & ネットワーク", value=geo_text, inline=False)
+
+    # フィールド3: ドメイン情報（ドメインが存在する場合）
+    if target_domain:
+        domain_text = (
+            f"**対象ドメイン:** `{target_domain}`\n"
+            f"**登録日:** {created_date}\n"
+            f"**最終更新:** {updated_date}\n"
+            f"**有効期限:** {expires_date}"
+        )
+        embed.add_field(name="🏢 ドメイン(WHOIS/RDAP)情報", value=domain_text, inline=False)
+
+    embed.set_footer(text="マルチデータソース: ip-api, zipcloud, RDAP, Local DNS")
+    await interaction.followup.send(embed=embed)
+
+# --- 15. 管理者専用 メンバー特定・調査コマンド ---
+@bot.tree.command(name="userinfo", description="【管理者専用】サーバー内の特定メンバーの詳細情報やアカウント履歴を調査します")
+@app_commands.checks.has_permissions(administrator=True) # 管理者権限が必要
+@app_commands.describe(member="調査したいDiscordメンバーを選択してください")
+async def user_info_command(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer(thinking=True, ephemeral=True) # 管理者だけにプライベート表示
+    
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
+        return
+
+    # ロール一覧の作成（@everyone を除く）
+    roles = [role.mention for role in member.roles if role != guild.default_role]
+    roles_str = ", ".join(roles) if roles else "ロールなし"
+    if len(roles_str) > 1024:
+        roles_str = f"合計 {len(member.roles) - 1} 個のロール（文字数制限のため省略）"
+
+    # アカウント作成日とサーバー参加日を日本語のフォーマットに変換
+    created_at = member.created_at.strftime("%Y年%m月%d日 %H:%M:%S")
+    joined_at = member.joined_at.strftime("%Y年%m月%d日 %H:%M:%S") if member.joined_at else "不明"
+
+    # バッジやボット判定
+    is_bot = "🤖 ボット (Bot)" if member.bot else "👤 一般ユーザー"
+    
+    # 状態（ステータス）の判定
+    status_emoji = {
+        discord.Status.online: "🟢 オンライン",
+        discord.Status.idle: "🟡 退席中",
+        discord.Status.dnd: "🔴 取り込み中",
+        discord.Status.offline: "⚫ オフライン / 非表示"
+    }.get(member.status, "⚪ 不明")
+
+    # アクティビティ（プレイ中のゲームなど）
+    activities = []
+    for activity in member.activities:
+        if isinstance(activity, discord.Game):
+            activities.append(f"🎮 プレイ中: {activity.name}")
+        elif isinstance(activity, discord.Streaming):
+            activities.append(f"📺 配信中: [{activity.name}]({activity.url})")
+        elif isinstance(activity, discord.Spotify):
+            activities.append(f"🎵 Spotifyで聴いている: {activity.title} by {activity.artist}")
+        elif isinstance(activity, discord.CustomActivity):
+            if activity.name:
+                activities.append(f"💬 ステータス: {activity.name}")
+    activity_str = "\n".join(activities) if activities else "アクティビティなし"
+
+    # Embedの構築
+    embed = discord.Embed(
+        title=f"🔍 メンバー調査結果: {member.display_name}",
+        color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
+        description=f"対象ユーザー: {member.mention} (`{member.id}`)"
+    )
+    
+    if member.avatar:
+        embed.set_thumbnail(url=member.avatar.url)
+
+    embed.add_field(name="📌 基本属性", value=f"**アカウント種別:** {is_bot}\n**現在のステータス:** {status_emoji}", inline=False)
+    embed.add_field(name="📅 日時情報", value=f"**アカウント作成日:** {created_at}\n**サーバー参加日:** {joined_at}", inline=False)
+    embed.add_field(name="🛡️ 所持ロール", value=roles_str, inline=False)
+    embed.add_field(name="🎮 アクティビティ", value=activity_str, inline=False)
+    
+    if member.voice and member.voice.channel:
+        embed.add_field(name="🔊 ボイスチャンネル", value=f"参加中: `{member.voice.channel.name}`", inline=False)
+
+    embed.set_footer(text=f"実行者: {interaction.user.name} | サーバー名: {guild.name}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+# エラーハンドリング
+@user_info_command.error
+async def user_info_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ このコマンドはサーバーの管理者のみが使用できます。", ephemeral=True)
 
 # --- 8. 最大6個のロール対応リアクションロール設置コマンド ---
 class MultiReactionRoleButton(discord.ui.Button):
