@@ -132,7 +132,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
 
-# --- 4. 郵便番号検索コマンド（詳細情報を完全網羅） ---
+# --- 4. 郵便番号検索コマンド ---
 @bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所・ローマ字情報を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
@@ -156,33 +156,26 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
             return
                 
         res = data["results"][0]
+        pref_code = res.get('prefcode', '不明')
+        zip7 = res.get('zipcode', clean_zip)
         
-        # 郵便番号から読み取れる詳細なデータを分解
-        pref_code = res.get('prefcode', '不明') # 都道府県コード
-        zip7 = res.get('zipcode', clean_zip)    # 7桁郵便番号
-        
-        # 漢字の住所
-        address1 = res.get('address1', '') # 都道府県
-        address2 = res.get('address2', '') # 市区町村
-        address3 = res.get('address3', '') # 町域
+        address1 = res.get('address1', '')
+        address2 = res.get('address2', '')
+        address3 = res.get('address3', '')
         full_address = f"{address1}{address2}{address3}"
         
-        # ローマ字の住所
         kana1 = res.get('kana1', '')
         kana2 = res.get('kana2', '')
         kana3 = res.get('kana3', '')
         full_kana = f"{kana1} {kana2} {kana3}"
 
-        # 埋め込み（Embed）を作成
         embed = discord.Embed(title=f"📮 郵便番号詳細検索結果: 〒{zip7[:3]}-{zip7[3:]}", color=discord.Color.green())
-        
         embed.add_field(name="📍 住所情報", value=(
             f"**完全な住所:** {full_address}\n"
             f"**都道府県:** {address1} (コード: {pref_code})\n"
             f"**市区町村:** {address2}\n"
             f"**町域:** {address3 if address3 else '指定なし'}"
         ), inline=False)
-
         embed.add_field(name="🔤 カナ（読み）情報", value=f"`{full_kana}`", inline=False)
 
         await interaction.followup.send(embed=embed)
@@ -332,7 +325,7 @@ class MultiReactionRoleButton(discord.ui.Button):
 async def reactionrole_command(
     interaction: discord.Interaction, 
     role1: discord.Role, label1: str, emoji1: str = None,
-    role2: discord.Role = None, label2: str, emoji2: str = None,
+    role2: discord.Role = None, label2: str = None, emoji2: str = None,
     role3: discord.Role = None, label3: str = None, emoji3: str = None
 ):
     if not interaction.user.guild_permissions.manage_roles:
