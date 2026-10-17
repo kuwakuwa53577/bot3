@@ -81,7 +81,42 @@ def ping():
     return "Bot is running!", 200
 
 # --------------------------------------------------
-# 4. Discord Bot クラス
+# 4. リアクションロール用 動的ビュー（最大6個のボタン）
+# --------------------------------------------------
+class DynamicRoleButton(discord.ui.Button):
+    def __init__(self, label: str, role_id: int):
+        super().__init__(style=discord.ButtonStyle.primary, label=label, custom_id=f"role_btn_{role_id}")
+        self.role_id = role_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return
+        
+        role = guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ 指定されたロールが見つかりませんでした（削除された可能性があります）。", ephemeral=True)
+            return
+
+        member = interaction.user
+        try:
+            if role in member.roles:
+                await member.remove_roles(role)
+                await interaction.response.send_message(f"✅ ロール `{role.name}` を**解除**しました。", ephemeral=True)
+            else:
+                await member.add_roles(role)
+                await interaction.response.send_message(f"✅ ロール `{role.name}` を**付与**しました。", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ ロールの変更に失敗しました（ボットの権限やロール階層を確認してください）。エラー: `{e}`", ephemeral=True)
+
+class DynamicRoleView(discord.ui.View):
+    def __init__(self, buttons_info: list):
+        super().__init__(timeout=None)
+        for label, role_id in buttons_info:
+            self.add_item(DynamicRoleButton(label, role_id))
+
+# --------------------------------------------------
+# 5. Discord Bot クラス
 # --------------------------------------------------
 class MyBot(commands.Bot):
     async def setup_hook(self):
@@ -117,17 +152,16 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 # --------------------------------------------------
-# 5. 便利ツール・解析コマンド群 (/ip, /zip, /domain, /dns, /check_url, /status, /lookup)
+# 6. 便利ツール・解析コマンド群 (/ip, /zip, /domain, /dns, /check_url, /status, /userinfo, /reaction_role)
 # --------------------------------------------------
 
-# --- IPアドレス詳細完全解析コマンド（限界まで情報を網羅） ---
+# ① IPアドレス詳細完全解析コマンド
 @bot.tree.command(name="ip", description="指定されたIPアドレスから取得できるすべての情報を限界まで徹底的に解析します")
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
 async def lookup_ip(interaction: discord.Interaction, ip_address: str):
     await interaction.response.defer(thinking=True)
     target_ip = ip_address.strip().replace(" ", "")
     
-    # ip-api.com から全フィールドを最大限取得するビットマスク
     ip_url = f"http://ip-api.com/json/{target_ip}"
     ip_params = {"lang": "ja", "fields": "66846719"}
 
@@ -143,14 +177,12 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             await interaction.followup.send(f"⚠️ 情報を取得できませんでした。理由: {data.get('message', '不明なエラー')}")
             return
 
-        # 1. 逆引き（PTRレコード）の取得
         try:
             hostname = await asyncio.to_thread(socket.gethostbyaddr, target_ip)
             hostname_str = hostname[0]
         except Exception:
             hostname_str = "逆引きできませんでした（PTRレコードなし）"
 
-        # 2. 郵便番号から詳細な住所を逆引き
         zip_code = data.get("zip", "").strip().replace("-", "").replace(" ", "")
         full_address = "不明または日本国外"
         pref_code = data.get("prefcode", "不明")
@@ -168,19 +200,16 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             except Exception:
                 pass
 
-        # 3. 緯度・経度からGoogle Mapsリンクの作成
         lat = data.get("lat")
         lon = data.get("lon")
         google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}" if lat and lon else None
 
-        # 4. Embedの構築（限界まで情報を網羅）
         embed = discord.Embed(
             title=f"🌐 IPアドレス限界解析結果: `{data.get('query', target_ip)}`", 
             color=discord.Color.dark_blue(),
             description="IPジオロケーションAPI、DNS逆引き、および郵便番号DBから抽出した全データ"
         )
         
-        # フィールド1: 地理・住所情報
         embed.add_field(
             name="📍 地理・詳細住所情報", 
             value=(
@@ -194,7 +223,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             inline=False
         )
         
-        # フィールド2: 座標・時差・文化
         embed.add_field(
             name="🧭 座標・タイムゾーン", 
             value=(
@@ -206,7 +234,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             inline=False
         )
         
-        # フィールド3: 通信会社・ネットワーク情報
         embed.add_field(
             name="🏢 ネットワーク・プロバイダ情報", 
             value=(
@@ -219,7 +246,6 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
             inline=False
         )
         
-        # フィールド4: セキュリティ・回線フラグ
         is_mobile = "🔴 モバイル回線 (4G/5G/LTE)" if data.get("mobile") else "🟢 固定回線 / ブロードバンド"
         is_proxy = "⚠️ VPN・プロキシ・Tor検知" if data.get("proxy") else "🟢 通常接続"
         is_hosting = "⚠️ データセンター / VPS" if data.get("hosting") else "🟢 一般回線"
@@ -242,6 +268,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         
     except Exception as e:
         await interaction.followup.send(f"⚠️ 予期せぬエラーが発生しました: {e}")
+
 # ② 郵便番号検索コマンド
 @bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所情報を検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
@@ -424,9 +451,7 @@ async def check_status(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラー: {e}")
 
-# --------------------------------------------------
-# 6. 管理者専用 メンバー位置情報特定コマンド (/userinfo)
-# --------------------------------------------------
+# ⑦ 管理者専用 メンバー位置情報特定コマンド (/userinfo)
 @bot.tree.command(name="userinfo", description="【管理者専用】Firebaseの登録IPから対象メンバーの大まかなエリアや住所情報を特定します")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
@@ -441,7 +466,6 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
             await interaction.followup.send("❌ サーバー内で実行してください。", ephemeral=True)
             return
 
-        # Firebaseから対象メンバーのIPを取得
         user_ip = get_user_ip_from_db(member.id)
         
         ip_location = "不明または未検証"
@@ -509,6 +533,66 @@ async def user_info_command(interaction: discord.Interaction, member: discord.Me
 
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: `{e}`", ephemeral=True)
+
+# ⑧ 管理者専用 リアクションロールパネル作成コマンド (/reaction_role)
+@bot.tree.command(name="reaction_role", description="【管理者専用】タイトルとメッセージ、最大6個までのボタン（ロール付与）を持つパネルを作成します")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    title="パネルのタイトル",
+    message="パネルの説明やメッセージ本文",
+    role1="ボタン1で付与するロール", label1="ボタン1のラベル名",
+    role2="ボタン2で付与するロール（任意）", label2="ボタン2のラベル名（任意）",
+    role3="ボタン3で付与するロール（任意）", label3="ボタン3のラベル名（任意）",
+    role4="ボタン4で付与するロール（任意）", label4="ボタン4のラベル名（任意）",
+    role5="ボタン5で付与するロール（任意）", label5="ボタン5のラベル名（任意）",
+    role6="ボタン6で付与するロール（任意）", label6="ボタン6のラベル名（任意）",
+)
+async def reaction_role_command(
+    interaction: discord.Interaction,
+    title: str,
+    message: str,
+    role1: discord.Role, label1: str,
+    role2: discord.Role = None, label2: str = None,
+    role3: discord.Role = None, label3: str = None,
+    role4: discord.Role = None, label4: str = None,
+    role5: discord.Role = None, label5: str = None,
+    role6: discord.Role = None, label6: str = None,
+):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    buttons_info = []
+    pairs = [
+        (role1, label1), (role2, label2), (role3, label3),
+        (role4, label4), (role5, label5), (role6, label6)
+    ]
+
+    for r, l in pairs:
+        if r is not None:
+            if not l:
+                await interaction.followup.send(f"⚠️ ロール `{r.name}` に対応するボタンのラベル名（名前）が入力されていません。", ephemeral=True)
+                return
+            buttons_info.append((l, r.id))
+
+    if not buttons_info:
+        await interaction.followup.send("⚠️ 最低1つのロールとボタンを指定してください。", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=title,
+        description=message,
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="下のボタンを押すことで、対応するロールの付与・解除ができます。")
+
+    view = DynamicRoleView(buttons_info)
+
+    try:
+        await interaction.channel.send(embed=embed, view=view)
+        await interaction.followup.send("✅ リアクションロールパネルをこのチャンネルに送信しました！", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ パネルの送信に失敗しました: `{e}`", ephemeral=True)
 
 # --------------------------------------------------
 # 7. 起動処理
