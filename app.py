@@ -24,7 +24,15 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 PROXY_URL = os.getenv("PROXY_URL")
 PORT = int(os.getenv("PORT", 10000))
-TARGET_REACTION_CHANNEL_ID = int(os.getenv("TARGET_REACTION_CHANNEL_ID", "0"))
+
+# 複数チャンネル対応：カンマ区切りで指定（例: "123456789012345678,987654321098765432"）
+# 従来の単体指定環境変数 (TARGET_REACTION_CHANNEL_ID) にもフォールバック対応します
+raw_reaction_channels = os.getenv("TARGET_REACTION_CHANNEL_IDS") or os.getenv("TARGET_REACTION_CHANNEL_ID", "")
+TARGET_REACTION_CHANNEL_IDS = []
+for ch_id in raw_reaction_channels.split(","):
+    ch_id = ch_id.strip()
+    if ch_id.isdigit():
+        TARGET_REACTION_CHANNEL_IDS.append(int(ch_id))
 
 # --------------------------------------------------
 # 2. Firebase 初期化
@@ -136,6 +144,7 @@ bot = MyBot(command_prefix="!", intents=intents, proxy=PROXY_URL)
 async def on_ready():
     print("========================================")
     print(f"✅ Discord Bot 接続成功: {bot.user}")
+    print(f"📌 自動リアクション対象チャンネル数: {len(TARGET_REACTION_CHANNEL_IDS)} 件")
     print("========================================")
 
 @bot.event
@@ -143,7 +152,8 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    if TARGET_REACTION_CHANNEL_ID != 0 and message.channel.id == TARGET_REACTION_CHANNEL_ID:
+    # 複数チャンネルに対応：メッセージが送信されたチャンネルIDがリストに含まれているかチェック
+    if TARGET_REACTION_CHANNEL_IDS and message.channel.id in TARGET_REACTION_CHANNEL_IDS:
         try:
             await message.add_reaction("👍")
         except Exception:
@@ -152,7 +162,7 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 # --------------------------------------------------
-# 6. 便利ツール・解析コマンド群 (/ip, /zip, /domain, /dns, /check_url, /status, /userinfo, /reaction_role)
+# 6. 便利ツール・解析コマンド群
 # --------------------------------------------------
 
 # ① IPアドレス詳細完全解析コマンド
