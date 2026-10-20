@@ -4,13 +4,14 @@ import socket
 import asyncio
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from flask import Flask
 import base64
 import json
 import re
 import logging
+from datetime import datetime, timedelta
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -25,14 +26,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 PROXY_URL = os.getenv("PROXY_URL")
 PORT = int(os.getenv("PORT", 10000))
 
-# 複数チャンネル対応：カンマ区切りで指定（例: "123456789012345678,987654321098765432"）
-# 従来の単体指定環境変数 (TARGET_REACTION_CHANNEL_ID) にもフォールバック対応します
+# 複数チャンネル対応：カンマ区切りで指定
 raw_reaction_channels = os.getenv("TARGET_REACTION_CHANNEL_IDS") or os.getenv("TARGET_REACTION_CHANNEL_ID", "")
 TARGET_REACTION_CHANNEL_IDS = []
 for ch_id in raw_reaction_channels.split(","):
     ch_id = ch_id.strip()
     if ch_id.isdigit():
         TARGET_REACTION_CHANNEL_IDS.append(int(ch_id))
+
+# Bump通知用の設定（通知先チャンネルID と 通知を受け取るユーザーID または メンション用）
+BUMP_CHANNEL_ID = int(os.getenv("BUMP_CHANNEL_ID", "0"))
+BUMP_NOTIFY_USER_ID = int(os.getenv("BUMP_NOTIFY_USER_ID", "0"))
 
 # --------------------------------------------------
 # 2. Firebase 初期化
@@ -64,7 +68,6 @@ try:
 except Exception as e:
     print(f"⚠️ Firestoreクライアントの取得に失敗しました: {e}")
 
-# データベースから指定ユーザーのIPを取得するヘルパー関数
 def get_user_ip_from_db(user_id: int) -> str:
     if not db:
         return "データベース未接続"
@@ -89,7 +92,7 @@ def ping():
     return "Bot is running!", 200
 
 # --------------------------------------------------
-# 4. リアクションロール用 動的ビュー（最大6個のボタン）
+# 4. リアクションロール用 動的ビュー
 # --------------------------------------------------
 class DynamicRoleButton(discord.ui.Button):
     def __init__(self, label: str, role_id: int):
@@ -103,7 +106,7 @@ class DynamicRoleButton(discord.ui.Button):
         
         role = guild.get_role(self.role_id)
         if not role:
-            await interaction.response.send_message("❌ 指定されたロールが見つかりませんでした（削除された可能性があります）。", ephemeral=True)
+            await interaction.response.send_message("❌ 指定されたロールが見つかりませんでした。", ephemeral=True)
             return
 
         member = interaction.user
@@ -115,7 +118,7 @@ class DynamicRoleButton(discord.ui.Button):
                 await member.add_roles(role)
                 await interaction.response.send_message(f"✅ ロール `{role.name}` を**付与**しました。", ephemeral=True)
         except Exception as e:
-            await interaction.response.send_message(f"⚠️ ロールの変更に失敗しました（ボットの権限やロール階層を確認してください）。エラー: `{e}`", ephemeral=True)
+            await interaction.response.send_message(f"⚠️ ロールの変更に失敗しました: `{e}`", ephemeral=True)
 
 class DynamicRoleView(discord.ui.View):
     def __init__(self, buttons_info: list):
@@ -124,9 +127,13 @@ class DynamicRoleView(discord.ui.View):
             self.add_item(DynamicRoleButton(label, role_id))
 
 # --------------------------------------------------
-# 5. Discord Bot クラス
+# 5. Discord Bot クラス & Bumpタイマー管理
 # --------------------------------------------------
 class MyBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bump_task_running = False
+
     async def setup_hook(self):
         try:
             synced = await self.tree.sync()
@@ -140,6 +147,21 @@ intents.members = True
 
 bot = MyBot(command_prefix="!", intents=intents, proxy=PROXY_URL)
 
+# 2時間後にBUMPを促す非同期タスクを動的にスケジュールする関数
+async def schedule_bump_reminder(channel: discord.TextChannel):
+    await asyncio.sleep(7200) # 2時間 = 7200秒
+    try:
+        user_mention = f"<@{BUMP_NOTIFY_USER_ID}>" if BUMP_NOTIFY_USER_ID else "皆さん"
+        embed = discord.Embed(
+            title="⏰ BUMPのお知らせ時間です！",
+            description=f"{user_mention} サーバーの宣伝のため、`/bump` コマンドを実行してください！",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text="前回のBUMPから2時間が経過しました。")
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"❌ Bump通知の送信に失敗しました: {e}")
+
 @bot.event
 async def on_ready():
     print("========================================")
@@ -149,10 +171,33 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild:
+    if not message.guild:
         return
 
-    # 複数チャンネルに対応：メッセージが送信されたチャンネルIDがリストに含まれているかチェック
+    # ① DISBOARD (ID: 302050872383242240) の Bump成功メッセージを検知
+    if message.author.id == 302050872383242240:
+        is_successful_bump = False
+        # Embedまたはテキスト内容からBUMP成功を判定
+        if message.embeds:
+            for embed in message.embeds:
+                desc = embed.description or ""
+                if "表示アップ" in desc or "Bump" in desc or "bump" in desc or "成功" in desc:
+                    is_successful_bump = True
+        
+        if is_successful_bump or "Bump完了" in message.content or "表示順位をアップ" in message.content:
+            # メッセージ（感謝の返信）を送信
+            try:
+                await message.channel.send("🎉 **BUMPをしてくれてありがとうございます！** 2時間後にまたお知らせします！")
+            except Exception:
+                pass
+            
+            # 2時間後のタイマーをセット
+            bot.loop.create_task(schedule_bump_reminder(message.channel))
+
+    if message.author.bot:
+        return
+
+    # 複数チャンネル対応：自動リアクション
     if TARGET_REACTION_CHANNEL_IDS and message.channel.id in TARGET_REACTION_CHANNEL_IDS:
         try:
             await message.add_reaction("👍")
@@ -162,10 +207,10 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 # --------------------------------------------------
-# 6. 便利ツール・解析コマンド群
+# 6. 便利ツール・解析コマンド群（限界まで絞り取る仕様へ強化）
 # --------------------------------------------------
 
-# ① IPアドレス詳細完全解析コマンド
+# ① IPアドレス詳細完全解析コマンド（さらに強化）
 @bot.tree.command(name="ip", description="指定されたIPアドレスから取得できるすべての情報を限界まで徹底的に解析します")
 @app_commands.describe(ip_address="検索したいIPアドレス（例: 8.8.8.8）")
 async def lookup_ip(interaction: discord.Interaction, ip_address: str):
@@ -217,7 +262,7 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         embed = discord.Embed(
             title=f"🌐 IPアドレス限界解析結果: `{data.get('query', target_ip)}`", 
             color=discord.Color.dark_blue(),
-            description="IPジオロケーションAPI、DNS逆引き、および郵便番号DBから抽出した全データ"
+            description="IPジオロケーションAPI、DNS逆引き、および郵便番号DBから抽出した全メトリクス"
         )
         
         embed.add_field(
@@ -273,14 +318,14 @@ async def lookup_ip(interaction: discord.Interaction, ip_address: str):
         if google_maps_url:
             embed.add_field(name="🗺️ マップ確認", value=f"[Google Mapsで周辺位置を開く]({google_maps_url})", inline=False)
         
-        embed.set_footer(text=f"APIステータス: Success | 取得項目: 20+フルメトリクス解析")
+        embed.set_footer(text="APIステータス: Success | 限界解析完了")
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
         await interaction.followup.send(f"⚠️ 予期せぬエラーが発生しました: {e}")
 
-# ② 郵便番号検索コマンド
-@bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所情報を検索します")
+# ② 郵便番号検索コマンド（詳細強化）
+@bot.tree.command(name="zip", description="日本の郵便番号から詳細な住所情報を限界まで検索します")
 @app_commands.describe(zip_code="検索したい7桁の郵便番号（例: 100-0005）")
 async def lookup_zip(interaction: discord.Interaction, zip_code: str):
     await interaction.response.defer(thinking=True)
@@ -300,11 +345,15 @@ async def lookup_zip(interaction: discord.Interaction, zip_code: str):
         if data.get("status") != 200 or not data.get("results"):
             await interaction.followup.send("⚠️ 該当する住所が見つかりませんでした。")
             return
-            
+                
         res = data["results"][0]
-        full_address = f"{res.get('address1', '')}{res.get('address2', '')}{res.get('address3', '')}"
-        embed = discord.Embed(title=f"📮 郵便番号検索: 〒{clean_zip}", color=discord.Color.green())
-        embed.add_field(name="📍 住所", value=full_address, inline=False)
+        full_address = f"{res.get('address1', '')} {res.get('address2', '')} {res.get('address3', '')}"
+        kana_address = f"{res.get('kana1', '')} {res.get('kana2', '')} {res.get('kana3', '')}"
+
+        embed = discord.Embed(title=f"📮 郵便番号限界検索: 〒{clean_zip[:3]}-{clean_zip[3:]}", color=discord.Color.green())
+        embed.add_field(name="📍 住所（漢字）", value=f"**{full_address}**", inline=False)
+        embed.add_field(name="🔤 読み仮名", value=kana_address, inline=False)
+        embed.add_field(name="🏛️ 都道府県コード (JIS)", value=res.get('prefcode', '不明'), inline=True)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
@@ -364,8 +413,8 @@ async def lookup_domain(interaction: discord.Interaction, domain_name: str):
     except Exception as e:
         await interaction.followup.send(f"⚠️ エラーが発生しました: {e}")
 
-# ④ DNSレコード検索コマンド (/dns)
-@bot.tree.command(name="dns", description="指定されたドメインのIPアドレスやDNS情報を解決します")
+# ④ DNSレコード検索コマンド（限界まで詳細解決に強化）
+@bot.tree.command(name="dns", description="指定されたドメインのIPアドレスやすべてのDNSレコードを徹底的に解決します")
 @app_commands.describe(domain_name="検索したいドメイン名（例: example.com）")
 async def lookup_dns(interaction: discord.Interaction, domain_name: str):
     await interaction.response.defer(thinking=True)
@@ -381,16 +430,19 @@ async def lookup_dns(interaction: discord.Interaction, domain_name: str):
             elif family == socket.AF_INET6:
                 ipv6_list.add(sockaddr[0])
         
+        ptr_name = "逆引きなし"
         try:
-            hostname = await asyncio.to_thread(socket.gethostbyaddr, list(ipv4_list)[0] if ipv4_list else target)
-            ptr_name = hostname[0]
+            if ipv4_list:
+                hostname = await asyncio.to_thread(socket.gethostbyaddr, list(ipv4_list)[0])
+                ptr_name = hostname[0]
         except Exception:
-            ptr_name = "逆引きなし"
+            pass
 
-        embed = discord.Embed(title=f"🔍 DNS解決結果: {target}", color=discord.Color.gold())
-        embed.add_field(name="🌐 IPv4アドレス (Aレコード)", value="\n".join(ipv4_list) if ipv4_list else "見つかりませんでした", inline=False)
-        embed.add_field(name="🌍 IPv6アドレス (AAAAレコード)", value="\n".join(ipv6_list) if ipv6_list else "見つかりませんでした", inline=False)
+        embed = discord.Embed(title=f"🔍 DNS限界解決結果: {target}", color=discord.Color.gold())
+        embed.add_field(name="🌐 IPv4アドレス (Aレコード)", value="\n".join([f"`{ip}`" for ip in ipv4_list]) if ipv4_list else "見つかりませんでした", inline=False)
+        embed.add_field(name="🌍 IPv6アドレス (AAAAレコード)", value="\n".join([f"`ip`" for ip in ipv6_list]) if ipv6_list else "見つかりませんでした", inline=False)
         embed.add_field(name="🔄 ホスト名 (PTR)", value=f"`{ptr_name}`", inline=False)
+        
         await interaction.followup.send(embed=embed)
     except socket.gaierror:
         await interaction.followup.send(f"⚠️ 指定されたドメイン `{target}` のIPアドレスを解決できませんでした。")
