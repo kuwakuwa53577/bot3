@@ -174,22 +174,40 @@ async def on_message(message: discord.Message):
     if not message.guild:
         return
 
-    # ① DISBOARD (ID: 302050872383242240) の Bump成功メッセージを検知
-    if message.author.id == 302050872383242240:
+    # デバッグ用：DISBOARDからのメッセージか確認するためにログに出力（必要に応じて確認用）
+    if message.author.id == 302050872383242240 or "disboard" in message.author.name.lower():
+        print(f"🔍 [DEBUG] DISBOARD関連メッセージ検知: author={message.author} (ID: {message.author.id}), content={message.content}")
+
+    # ① DISBOARD (ID: 302050872383242240 または名前判定) の Bump成功メッセージを検知
+    if message.author.id == 302050872383242240 or "disboard" in message.author.name.lower():
         is_successful_bump = False
-        # Embedまたはテキスト内容からBUMP成功を判定
+        
+        # メッセージ本文のチェック
+        content_lower = message.content.lower()
+        if "bump" in content_lower or "表示順位" in content_lower or "成功" in content_lower or "ありがとう" in content_lower:
+            is_successful_bump = True
+
+        # Embedの内容をくまなくチェック
         if message.embeds:
             for embed in message.embeds:
+                title = embed.title or ""
                 desc = embed.description or ""
-                if "表示アップ" in desc or "Bump" in desc or "bump" in desc or "成功" in desc:
-                    is_successful_bump = True
+                footer = embed.footer.text if embed.footer else ""
+                combined_text = f"{title} {desc} {footer}".lower()
+                
+                # Bump成功時によくあるキーワード群
+                if any(kw in combined_text for kw in ["表示アップ", "bump", "成功", "アップ", "完了"]):
+                    # 失敗メッセージ（「まだ時間が経っていません」など）を除外
+                    if not any(err_kw in combined_text for err_kw in ["まだ", "待つ", "error", "失敗"]):
+                        is_successful_bump = True
+                        break
         
-        if is_successful_bump or "Bump完了" in message.content or "表示順位をアップ" in message.content:
-            # メッセージ（感謝の返信）を送信
+        if is_successful_bump:
+            print("🎉 BUMP成功を検知しました！ 2時間後のタイマーをセットします。")
             try:
                 await message.channel.send("🎉 **BUMPをしてくれてありがとうございます！** 2時間後にまたお知らせします！")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ 感謝メッセージの送信に失敗しました: {e}")
             
             # 2時間後のタイマーをセット
             bot.loop.create_task(schedule_bump_reminder(message.channel))
